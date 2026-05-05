@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
     }
 
     const pollWindowMinutes = Number(process.env.POLL_WINDOW_MINUTES ?? '30');
-    const defaultChannelId = process.env.DISCORD_DEFAULT_CHANNEL_ID!;
+    const defaultChannelId = process.env.DISCORD_DEFAULT_CHANNEL_ID || undefined;
 
     const result = await runUnitePing({
       supabase: svc,

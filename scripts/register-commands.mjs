@@ -1,3 +1,7 @@
+import dotenv from 'dotenv';
+
+dotenv.config({ path: '.env.local' });
+
 // Node.js 20+ (fetch 同梱)
 const token = process.env.DISCORD_BOT_TOKEN;
 const applicationId = process.env.DISCORD_APPLICATION_ID;
@@ -10,22 +14,9 @@ if (!token || !applicationId || !guildId) {
 
 const commands = [
   {
-    name: 'unite',
-    description: 'Pokemon UNITE helper commands',
+    name: 'setup',
+    description: 'サーバー向け案内メッセージを投稿',
     type: 1, // CHAT_INPUT
-    options: [
-      { type: 1, name: 'ping', description: '友達の最終ログインを今すぐチェック' },
-      {
-        type: 1,
-        name: 'add',
-        description: '監視対象の友達を追加',
-        options: [
-          { type: 3, name: 'friend_unite_id', description: 'トレーナーID', required: true },
-          { type: 3, name: 'label', description: '表示名', required: false },
-        ],
-      },
-      { type: 1, name: 'list', description: '友達一覧を表示' },
-    ],
     dm_permission: false,
   },
 ];

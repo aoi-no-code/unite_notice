@@ -1,0 +1,119 @@
+:root {
+  color-scheme: dark;
+  --bg: #0c111c;
+  --card: #151c2c;
+  --border: #2a3755;
+  --text: #e8edf7;
+  --muted: #8b9bb8;
+  --discord: #5865f2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    'Noto Sans JP',
+    sans-serif;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font: inherit;
+}
+
+.container {
+  min-height: 100vh;
+  padding: 32px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 12px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.btn-primary {
+  border: none;
+  background: var(--discord);
+  color: #fff;
+}
+
+.input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+}
+
+.panel {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--card);
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 20px 14px 28px;
+  }
+
+  .card {
+    padding: 18px;
+    border-radius: 12px;
+  }
+
+  .actions,
+  .actions > * {
+    width: 100%;
+  }
+
+  .btn {
+    width: 100%;
+  }
+}
