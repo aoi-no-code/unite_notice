@@ -14,6 +14,11 @@ import {
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchLatestBattleAt, fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
 import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
+import {
+  buildFriendCodeCopyEphemeral,
+  buildFriendCodeIssuePayload,
+  isFriendCode,
+} from '@/lib/discordFriendCodeUi';
 
 const InteractionType = {
   PING: 1,
@@ -36,6 +41,13 @@ function ephemeral(content: string, components?: unknown[], embeds?: unknown[]) 
   return jsonResponse({
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: { content, components, embeds, flags: 64 },
+  });
+}
+
+function ephemeralData(data: Record<string, unknown>) {
+  return jsonResponse({
+    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+    data: { ...data, flags: 64 },
   });
 }
 
@@ -496,10 +508,7 @@ export async function POST(req: NextRequest) {
 
       if (sub === 'code') {
         const { code, expiresAt } = await createFriendCode(userDiscordId);
-        const expires = new Date(expiresAt).toLocaleString('ja-JP');
-        return ephemeral(
-          `フレンド追加用コードを発行しました（7日間有効）。\n\nコード: **${code}**\n\n相手には Bot の DM で次を実行してもらってください:\n/friend request ${code}\n\n申請が届いたら DM に通知が来ます。`
-        );
+        return ephemeralData(buildFriendCodeIssuePayload(code, expiresAt));
       }
 
       if (sub === 'request') {
@@ -600,6 +609,12 @@ export async function POST(req: NextRequest) {
       const result = await upsertRegistration(userDiscordId, unitePlayerId);
       const profileLine = buildRegisterProfileLine(result);
       return ephemeral(`登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`);
+    }
+
+    if (customId.startsWith('friend:copy:')) {
+      const code = customId.replace('friend:copy:', '').trim().toUpperCase();
+      if (!isFriendCode(code)) return ephemeral('無効なコードです。');
+      return ephemeralData(buildFriendCodeCopyEphemeral(code));
     }
 
     if (customId.startsWith('friend:req:approve:')) {
