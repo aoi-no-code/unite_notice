@@ -17,6 +17,10 @@ type UnitePlayerPayload = {
     GameStartTime?: string;
     MapID?: number;
     MapSubMode?: number;
+    PartyType?: string;
+    partyType?: string;
+    GroupType?: string;
+    [key: string]: unknown;
   }>;
   [key: string]: unknown;
 };
@@ -286,22 +290,136 @@ export async function fetchUniteProfile(identifier: string, locale = 'jp'): Prom
   };
 }
 
-export async function fetchLatestBattleAt(
-  identifier: string
-): Promise<{ latestBattleAt: Date | null }> {
-  const profileData = await fetchUniteProfile(identifier);
-  const matchResults = profileData?.rawPlayer?.MatchResults;
-  if (!matchResults || matchResults.length === 0) {
-    return { latestBattleAt: null };
-  }
+export type LatestMatchSummary = {
+  latestBattleAt: Date | null;
+  timeAgoLabel: string;
+  partyLabel: string | null;
+};
 
+const PARTY_LABEL_JA: Record<string, string> = {
+  Solo: 'ソロ',
+  Duo: 'デュオ',
+  Trio: 'トリオ',
+};
+
+export function formatPartyLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  return PARTY_LABEL_JA[trimmed] ?? trimmed;
+}
+
+export function formatTimeAgoFromDate(date: Date): string {
+  const diffMs = Math.max(0, Date.now() - date.getTime());
+  const totalMin = Math.max(1, Math.floor(diffMs / (60 * 1000)));
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (hours > 0 && mins > 0) return `${hours}時間${mins}分前`;
+  if (hours > 0) return `${hours}時間前`;
+  return `${mins}分前`;
+}
+
+function pickLatestMatchRow(
+  matchResults: NonNullable<UnitePlayerPayload['MatchResults']>
+): NonNullable<UnitePlayerPayload['MatchResults']>[number] | null {
+  let latest: (typeof matchResults)[number] | null = null;
   let latestSec = 0;
   for (const row of matchResults) {
     const sec = Number(row?.GameStartTime ?? 0);
-    if (Number.isFinite(sec) && sec > latestSec) latestSec = sec;
+    if (!Number.isFinite(sec) || sec <= 0) continue;
+    if (sec > latestSec) {
+      latestSec = sec;
+      latest = row;
+    }
   }
-  if (latestSec <= 0) return { latestBattleAt: null };
-  return { latestBattleAt: new Date(latestSec * 1000) };
+  return latest;
+}
+
+function extractPartyFromMatchRow(row: Record<string, unknown> | undefined): string | null {
+  if (!row) return null;
+  const raw =
+    (row.PartyType as string | undefined) ??
+    (row.partyType as string | undefined) ??
+    (row.GroupType as string | undefined) ??
+    (row.groupType as string | undefined);
+  return formatPartyLabel(typeof raw === 'string' ? raw : null);
+}
+
+function stripHtmlToLines(html: string): string[] {
+  const withoutScripts = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ');
+  const text = withoutScripts.replace(/<[^>]+>/g, '\n');
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function parseLatestMatchFromPlayerHtml(html: string): LatestMatchSummary | null {
+  const lines = stripHtmlToLines(html);
+  for (let i = 0; i < lines.length; i++) {
+    const timeMatch = lines[i].match(/^約(\d+)(時間|分)前$/);
+    if (!timeMatch) continue;
+    const amount = Number(timeMatch[1]);
+    const unit = timeMatch[2];
+    let partyLabel: string | null = null;
+    for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+      if (lines[j] === 'Solo' || lines[j] === 'Duo' || lines[j] === 'Trio') {
+        partyLabel = formatPartyLabel(lines[j]);
+        break;
+      }
+    }
+    const approxMs = unit === '時間' ? amount * 60 * 60 * 1000 : amount * 60 * 1000;
+    const latestBattleAt = new Date(Date.now() - approxMs);
+    return { latestBattleAt, timeAgoLabel: formatTimeAgoFromDate(latestBattleAt), partyLabel };
+  }
+  return null;
+}
+
+async function fetchPlayerPageHtml(identifier: string, locale = 'jp'): Promise<string | null> {
+  const base = normalizeBaseUrl(process.env.UNITEAPI_BASE ?? 'https://uniteapi.dev');
+  const paths = [`/${locale}/p/${encodeURIComponent(identifier)}`, `/p/${encodeURIComponent(identifier)}`];
+  for (const path of paths) {
+    const res = await fetch(`${base}${path}`, { cache: 'no-store', headers: browserLikeHeaders });
+    if (!res.ok) continue;
+    const html = await res.text();
+    const plainTitle = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';
+    if (UNITE_NOT_FOUND_TITLE_MARKERS.some((m) => plainTitle.includes(m))) continue;
+    return html;
+  }
+  return null;
+}
+
+export async function fetchLatestMatchSummary(
+  identifier: string,
+  options?: { uniteApiUid?: string | null; locale?: string }
+): Promise<LatestMatchSummary | null> {
+  const locale = options?.locale ?? 'jp';
+  const lookupKey = await resolveUniteProfileLookupKey(identifier, options?.uniteApiUid, locale);
+
+  const profileData = await fetchUniteProfile(lookupKey, locale);
+  const matchResults = profileData?.rawPlayer?.MatchResults;
+  if (matchResults && matchResults.length > 0) {
+    const latest = pickLatestMatchRow(matchResults);
+    const sec = Number(latest?.GameStartTime ?? 0);
+    if (Number.isFinite(sec) && sec > 0) {
+      const latestBattleAt = new Date(sec * 1000);
+      return {
+        latestBattleAt,
+        timeAgoLabel: formatTimeAgoFromDate(latestBattleAt),
+        partyLabel: extractPartyFromMatchRow(latest as Record<string, unknown>),
+      };
+    }
+  }
+
+  const html = await fetchPlayerPageHtml(lookupKey, locale);
+  if (!html) return null;
+  return parseLatestMatchFromPlayerHtml(html);
+}
+
+export async function fetchLatestBattleAt(
+  identifier: string
+): Promise<{ latestBattleAt: Date | null }> {
+  const summary = await fetchLatestMatchSummary(identifier);
+  return { latestBattleAt: summary?.latestBattleAt ?? null };
 }
 
 export async function fetchLastOnline(trainerId: string): Promise<{ lastOnline: Date | null }> {

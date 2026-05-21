@@ -13,7 +13,14 @@ import {
   submitFriendRequest,
 } from '@/lib/discordFriends';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
-import { fetchLatestBattleAt, fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
+import { fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
+import {
+  buildPlayFriendRows,
+  buildPlayInvitePayload,
+  buildPlayListPayload,
+  getPlaySenderDisplayName,
+  PLAY_REPLY_MESSAGES,
+} from '@/lib/play';
 import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
 import { buildFriendCodeGuidePayload, FRIEND_CODE_ISSUE_BUTTON_ID } from '@/lib/discordFriendCodeUi';
 
@@ -152,90 +159,9 @@ function buildRegisterProfileLine(result: { trainerName: string | null; fetchSta
   return 'ゲーム内名: 取得失敗（IDのみ保存）';
 }
 
-
-async function getGuildMemberDiscordUserIds(guildId: string, excludeDiscordUserId?: string): Promise<string[]> {
-  const svc = getServiceClient();
-  let query = svc.from('discord_guild_members').select('discord_user_id').eq('guild_id', guildId);
-  if (excludeDiscordUserId) {
-    query = query.neq('discord_user_id', excludeDiscordUserId);
-  }
-  const { data } = await query.limit(200);
-  return [...new Set((data ?? []).map((row) => row.discord_user_id as string))];
-}
-
-async function buildPlayCandidates(guildId: string, currentDiscordUserId: string) {
-  const svc = getServiceClient();
-  const friendIds = await getFriendDiscordIds(currentDiscordUserId);
-  if (friendIds.size === 0) return [];
-  const guildMemberIds = await getGuildMemberDiscordUserIds(guildId, currentDiscordUserId);
-  if (guildMemberIds.length === 0) return [];
-  const { data: rows } = await svc
-    .from('discord_user_game_profiles')
-    .select('discord_user_id, unite_player_id, notify_enabled')
-    .in('discord_user_id', guildMemberIds)
-    .eq('notify_enabled', true)
-    .limit(25);
-
-  const twoHoursMs = 2 * 60 * 60 * 1000;
-  const now = Date.now();
-  const candidates: Array<{
-    discordUserId: string;
-    unitePlayerId: string;
-    latestBattleAt: Date;
-    minutesAgo: number;
-  }> = [];
-
-  for (const row of rows ?? []) {
-    const discordUserId = row.discord_user_id as string;
-    if (!friendIds.has(discordUserId)) continue;
-    const unitePlayerId = row.unite_player_id as string;
-    const { latestBattleAt } = await fetchLatestBattleAt(unitePlayerId);
-    if (!latestBattleAt) continue;
-    const diffMs = now - latestBattleAt.getTime();
-    if (diffMs > twoHoursMs) continue;
-    candidates.push({
-      discordUserId,
-      unitePlayerId,
-      latestBattleAt,
-      minutesAgo: Math.max(1, Math.floor(diffMs / (60 * 1000))),
-    });
-  }
-
-  candidates.sort((a, b) => a.latestBattleAt.getTime() - b.latestBattleAt.getTime());
-  return candidates;
-}
-
-function pairDiscordIds(a: string, b: string): { low: string; high: string } {
-  return a < b ? { low: a, high: b } : { low: b, high: a };
-}
-
-async function getFriendDiscordIds(discordUserId: string): Promise<Set<string>> {
-  const svc = getServiceClient();
-  const { data: rows } = await svc
-    .from('discord_friendships')
-    .select('user_low_discord_id,user_high_discord_id')
-    .or(`user_low_discord_id.eq.${discordUserId},user_high_discord_id.eq.${discordUserId}`);
-  const friendIds = new Set<string>();
-  for (const row of rows ?? []) {
-    const low = row.user_low_discord_id as string;
-    const high = row.user_high_discord_id as string;
-    friendIds.add(low === discordUserId ? high : low);
-  }
-  return friendIds;
-}
-
-async function notifyUsers(senderDiscordUserId: string, targetDiscordUserIds: string[]) {
-  const errors: string[] = [];
-  for (const discordUserId of targetDiscordUserIds) {
-    try {
-      await sendDiscordDM(discordUserId, {
-        content: `🎮 <@${senderDiscordUserId}> さんからお誘いです！\n今プレイ可能なら返信してみてください。`,
-      });
-    } catch {
-      errors.push(discordUserId);
-    }
-  }
-  return errors;
+async function areFriends(a: string, b: string): Promise<boolean> {
+  const friends = await listDiscordFriends(a);
+  return friends.some((f) => f.discordUserId === b);
 }
 
 async function trackGuildContext(data: any) {
@@ -445,59 +371,36 @@ export async function POST(req: NextRequest) {
         .eq('discord_user_id', userDiscordId)
         .maybeSingle();
       if (!myProfile) return ephemeral('登録が見つかりません。先に /register を実行してください。');
-      const guilds = await getUserGuildsForDm(userDiscordId);
-      const guildIds = guilds.map((g) => g.id);
-      if (guildIds.length === 0) return ephemeral('検索対象のサーバーが見つかりません。先にサーバー内でBotを利用してください。');
 
-      if (guildIds.length > 1) {
-        const nameMap = new Map(guilds.map((g) => [g.id as string, g.name]));
-        return ephemeral('検索対象のサーバーを選択してください。', [
-          {
-            type: 1,
-            components: [
-              {
-                type: 3,
-                custom_id: 'play:guild_select',
-                placeholder: 'サーバーを選択',
-                options: guildIds.slice(0, 25).map((id) => ({ label: (nameMap.get(id) ?? id).slice(0, 100), value: id })),
-              },
-            ],
-          },
-        ]);
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('プレイ検索の情報を取得できませんでした。再実行してください。');
       }
 
-      const guildId = guildIds[0];
-      const candidates = await buildPlayCandidates(guildId, userDiscordId);
-      if (candidates.length === 0) return ephemeral('フレンドの中で直近プレイ候補が見つかりませんでした。先に /friend code でフレンドを追加してください。');
-      const embed = {
-        title: '🎮 今誘えそうな候補',
-        description: candidates
-          .map((c, idx) => `${idx + 1}. <@${c.discordUserId}> (${c.minutesAgo}分前 / ID:${c.unitePlayerId})`)
-          .join('\n'),
-        color: 0x57f287,
-      };
-      return ephemeral('通知先を選択してください。', [
-        {
-          type: 1,
-          components: [
-            {
-              type: 3,
-              custom_id: `play:notify_one:${guildId}`,
-              placeholder: '通知するユーザーを選択',
-              options: candidates
-                .slice(0, 25)
-                .map((c) => ({ label: `${c.unitePlayerId} (${c.minutesAgo}分前)`.slice(0, 100), value: c.discordUserId })),
-            },
-          ],
-        },
-        {
-          type: 1,
-          components: [
-            { type: 2, style: 1, label: '全員に通知', custom_id: `play:notify_all:${guildId}` },
-            { type: 2, style: 2, label: '閉じる', custom_id: 'play:close' },
-          ],
-        },
-      ], [embed]);
+      waitUntil(
+        (async () => {
+          try {
+            const rows = await buildPlayFriendRows(userDiscordId);
+            const payload = buildPlayListPayload(rows);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              ...payload,
+              flags: 64,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] play followup failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: 'プレイ状況の取得中にエラーが発生しました。少し待ってから再実行してください。',
+              flags: 64,
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
 
     if (name === 'friend') {
@@ -770,72 +673,89 @@ export async function POST(req: NextRequest) {
       return ephemeral('チェックを実行しました。');
     }
 
-    if (customId === 'play:guild_select') {
-      const guildId = selectedValues[0];
-      if (!guildId) return ephemeral('サーバーを選択してください。');
-      const candidates = await buildPlayCandidates(guildId, userDiscordId);
-      if (candidates.length === 0) return ephemeral('直近でプレイしている候補が見つかりませんでした。');
-      const embed = {
-        title: '🎮 今誘えそうな候補',
-        description: candidates
-          .map((c, idx) => `${idx + 1}. <@${c.discordUserId}> (${c.minutesAgo}分前 / ID:${c.unitePlayerId})`)
-          .join('\n'),
-        color: 0x57f287,
-      };
-      return ephemeral('通知先を選択してください。', [
-        {
-          type: 1,
-          components: [
-            {
-              type: 3,
-              custom_id: `play:notify_one:${guildId}`,
-              placeholder: '通知するユーザーを選択',
-              options: candidates
-                .slice(0, 25)
-                .map((c) => ({ label: `${c.unitePlayerId} (${c.minutesAgo}分前)`.slice(0, 100), value: c.discordUserId })),
-            },
-          ],
-        },
-        {
-          type: 1,
-          components: [
-            { type: 2, style: 1, label: '全員に通知', custom_id: `play:notify_all:${guildId}` },
-            { type: 2, style: 2, label: '閉じる', custom_id: 'play:close' },
-          ],
-        },
-      ], [embed]);
+    if (customId === 'play:invite_all') {
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('一括招待の情報を取得できませんでした。再実行してください。');
+      }
+
+      waitUntil(
+        (async () => {
+          try {
+            const rows = await buildPlayFriendRows(userDiscordId);
+            const targets = rows.filter((r) => r.unitePlayerId);
+            if (targets.length === 0) {
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: '招待できるフレンドがいません。',
+                flags: 64,
+              });
+              return;
+            }
+            const senderName = await getPlaySenderDisplayName(userDiscordId);
+            const payload = buildPlayInvitePayload(senderName, userDiscordId);
+            let sent = 0;
+            const failed: string[] = [];
+            for (const target of targets) {
+              try {
+                await sendDiscordDM(target.discordUserId, payload);
+                sent += 1;
+              } catch {
+                failed.push(target.displayName);
+              }
+            }
+            const failLine =
+              failed.length > 0 ? `\n\n送信できなかった相手: ${failed.slice(0, 5).join('、')}` : '';
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: `${sent}人に「一緒にやらない？」を送りました。${failLine}`,
+              flags: 64,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] play invite_all failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: '一括招待中にエラーが発生しました。',
+              flags: 64,
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
 
-    if (customId.startsWith('play:notify_one:')) {
-      const targetDiscordUserId = selectedValues[0];
-      if (!targetDiscordUserId) return ephemeral('通知先を選択してください。');
-      const errors = await notifyUsers(userDiscordId, [targetDiscordUserId]);
-      if (errors.length > 0) {
-        return ephemeral('通知に失敗しました。Discordのプライバシー設定でDMを許可してください。');
+    if (customId.startsWith('play:invite:')) {
+      const targetDiscordUserId = customId.replace('play:invite:', '');
+      if (!targetDiscordUserId) return ephemeral('招待先が不正です。');
+      if (!(await areFriends(userDiscordId, targetDiscordUserId))) {
+        return ephemeral('フレンド以外には招待できません。');
       }
-      return ephemeral('選択したユーザーにDM通知しました。');
+      const senderName = await getPlaySenderDisplayName(userDiscordId);
+      try {
+        await sendDiscordDM(targetDiscordUserId, buildPlayInvitePayload(senderName, userDiscordId));
+        return ephemeral(`${senderName} さんとして招待を送りました。`);
+      } catch {
+        return ephemeral('招待を送れませんでした。相手のDM設定を確認してください。');
+      }
     }
 
-    if (customId.startsWith('play:notify_all:')) {
-      const guildId = customId.replace('play:notify_all:', '');
-      const svc = getServiceClient();
-      const guildMemberIds = await getGuildMemberDiscordUserIds(guildId, userDiscordId);
-      if (guildMemberIds.length === 0) return ephemeral('通知対象が見つかりませんでした。');
-      const { data: rows } = await svc
-        .from('discord_user_game_profiles')
-        .select('discord_user_id')
-        .in('discord_user_id', guildMemberIds)
-        .eq('notify_enabled', true)
-        .limit(50);
-      const targetIds = (rows ?? []).map((row) => row.discord_user_id as string);
-      if (targetIds.length === 0) return ephemeral('通知対象が見つかりませんでした。');
-      const errors = await notifyUsers(userDiscordId, targetIds);
-      if (errors.length > 0) {
-        return ephemeral(
-          `一部通知に失敗しました（${errors.length}件）。Discordのプライバシー設定でDMを許可してください。`
-        );
+    if (customId.startsWith('play:reply:')) {
+      const parts = customId.split(':');
+      const replyCode = parts[2];
+      const senderDiscordUserId = parts[3];
+      const message = PLAY_REPLY_MESSAGES[replyCode];
+      if (!message || !senderDiscordUserId) return ephemeral('返信の処理に失敗しました。');
+      const responderName = await getPlaySenderDisplayName(userDiscordId);
+      try {
+        await sendDiscordDM(senderDiscordUserId, {
+          content: `🎮 **${responderName}** さん: ${message}`,
+        });
+        return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+      } catch {
+        return ephemeral('返信を送れませんでした。相手のDM設定を確認してください。');
       }
-      return ephemeral(`${targetIds.length}人にDM通知しました。`);
     }
 
     if (customId === 'play:close') {

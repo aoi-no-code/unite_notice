@@ -21,7 +21,7 @@ const commands = [
   },
   {
     name: 'play',
-    description: 'DMで最近プレイしている候補を探す',
+    description: 'フレンドの最新対戦を見て誘う',
     type: 1,
     dm_permission: true,
     contexts: [1, 2],
