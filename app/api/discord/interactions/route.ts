@@ -26,6 +26,7 @@ const InteractionResponseType = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
   DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
+  DEFERRED_UPDATE_MESSAGE: 6,
   UPDATE_MESSAGE: 7,
 } as const;
 
@@ -607,13 +608,10 @@ export async function POST(req: NextRequest) {
     }
 
     if (customId === FRIEND_CODE_ISSUE_BUTTON_ID) {
-      const { code, expiresAt } = await createFriendCode(userDiscordId);
-      const expires = new Date(expiresAt).toLocaleString('ja-JP');
+      const { code } = await createFriendCode(userDiscordId);
       try {
         await sendDiscordDM(userDiscordId, { content: code });
-        return ephemeral(
-          `コードを送信しました（${expires} まで有効）。\n\n**上のメッセージ**（コードのみ）を長押ししてコピーし、相手に伝えてください。`
-        );
+        return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
       } catch {
         return ephemeral('コードを送れませんでした。Discordのプライバシー設定でDMを許可してください。');
       }
