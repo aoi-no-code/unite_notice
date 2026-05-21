@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   discord_id text UNIQUE,
   trainer_name text,
   unite_trainer_id text CHECK (unite_trainer_id IS NULL OR unite_trainer_id ~ '^[A-Za-z0-9]+$'),
-  unite_api_uid text,
+  -- unite_api_uid は Discord 専用フローでは discord_user_game_profiles 側を使用（本番で users 削除済みの場合あり）
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
