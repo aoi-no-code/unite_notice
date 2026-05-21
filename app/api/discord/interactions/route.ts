@@ -694,20 +694,24 @@ export async function POST(req: NextRequest) {
             }
             const senderName = await getPlaySenderDisplayName(userDiscordId);
             const payload = buildPlayInvitePayload(senderName, userDiscordId);
-            let sent = 0;
+            const invited: string[] = [];
             const failed: string[] = [];
             for (const target of targets) {
               try {
                 await sendDiscordDM(target.discordUserId, payload);
-                sent += 1;
+                invited.push(target.displayName);
               } catch {
                 failed.push(target.displayName);
               }
             }
             const failLine =
-              failed.length > 0 ? `\n\n送信できなかった相手: ${failed.slice(0, 5).join('、')}` : '';
+              failed.length > 0 ? `\n\n誘えなかった相手: ${failed.slice(0, 5).join('、')}` : '';
+            const content =
+              invited.length > 0
+                ? `**${invited.join('、')}** を誘いました。${failLine}`
+                : `誘えた相手がいませんでした。${failLine}`;
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: `${sent}人に「一緒にやらない？」を送りました。${failLine}`,
+              content,
               flags: 64,
             });
           } catch (err) {
@@ -746,9 +750,10 @@ export async function POST(req: NextRequest) {
               return;
             }
             const senderName = await getPlaySenderDisplayName(userDiscordId);
+            const targetName = await getPlaySenderDisplayName(targetDiscordUserId);
             await sendDiscordDM(targetDiscordUserId, buildPlayInvitePayload(senderName, userDiscordId));
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: `${senderName} さんとして招待を送りました。`,
+              content: `**${targetName}** を誘いました。`,
               flags: 64,
             });
           } catch (err) {
