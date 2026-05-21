@@ -6,6 +6,7 @@ import {
   createFriendCode,
   formatFriendListLines,
   formatPendingRequestLine,
+  formatRequesterDisplayName,
   listDiscordFriends,
   listPendingFriendRequests,
   rejectFriendRequest,
@@ -543,13 +544,13 @@ export async function POST(req: NextRequest) {
                 .select('unite_player_id,trainer_name')
                 .eq('discord_user_id', userDiscordId)
                 .maybeSingle();
-              const label =
-                (requesterProfile?.trainer_name as string | null) ||
-                (requesterProfile?.unite_player_id as string | null) ||
-                userDiscordId;
+              const displayName = formatRequesterDisplayName(
+                requesterProfile?.trainer_name as string | null,
+                requesterProfile?.unite_player_id as string | null
+              );
               try {
                 await sendDiscordDM(result.ownerDiscordUserId, {
-                  content: `🎮 **フレンド申請**が届きました\n<@${userDiscordId}> さん（${label}）から申請があります。`,
+                  content: `🎮 **フレンド申請**が届きました\n${displayName} さんから申請があります。`,
                   components: [
                     {
                       type: 1,

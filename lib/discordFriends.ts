@@ -173,6 +173,18 @@ export async function listPendingFriendRequests(ownerDiscordUserId: string): Pro
   });
 }
 
+/** Discord ID は使わず、ゲーム内名 → ゲーム内ID → 汎用ラベルの順で表示 */
+export function formatRequesterDisplayName(
+  trainerName: string | null | undefined,
+  unitePlayerId: string | null | undefined
+): string {
+  const name = trainerName?.trim();
+  if (name) return name;
+  const id = unitePlayerId?.trim();
+  if (id) return id;
+  return '申請者';
+}
+
 export function formatFriendListLines(friends: FriendProfile[]): string {
   if (friends.length === 0) return 'フレンドはまだいません。';
   return friends
@@ -185,8 +197,9 @@ export function formatFriendListLines(friends: FriendProfile[]): string {
 }
 
 export function formatPendingRequestLine(req: PendingRequest): string {
-  const label = req.requesterTrainerName || req.requesterUniteId || req.requesterDiscordUserId;
-  const idPart = req.requesterUniteId ? ` / ${req.requesterUniteId}` : '';
+  const label = formatRequesterDisplayName(req.requesterTrainerName, req.requesterUniteId);
+  const idPart =
+    req.requesterTrainerName && req.requesterUniteId ? ` (${req.requesterUniteId})` : '';
   return `・${label}${idPart}`;
 }
 
