@@ -10,13 +10,11 @@ if (!token || !applicationId) {
   process.exit(1);
 }
 
-// グローバルコマンドは反映に時間がかかることがあります（数分〜）。
-// DMで候補として出したいコマンドは dm_permission=true にします。
 const commands = [
   {
     name: 'register',
     description: 'DMでゲーム内IDを登録',
-    type: 1, // CHAT_INPUT
+    type: 1,
     options: [{ type: 3, name: 'unite_player_id', description: 'ポケモンユナイトのゲーム内ID', required: true }],
     dm_permission: true,
     contexts: [1, 2],
@@ -24,14 +22,14 @@ const commands = [
   {
     name: 'play',
     description: 'DMで最近プレイしている候補を探す',
-    type: 1, // CHAT_INPUT
+    type: 1,
     dm_permission: true,
     contexts: [1, 2],
   },
   {
     name: 'notify',
     description: 'DM通知のON/OFFを切り替える',
-    type: 1, // CHAT_INPUT
+    type: 1,
     options: [
       {
         type: 3,
@@ -50,16 +48,17 @@ const commands = [
   {
     name: 'friend',
     description: 'フレンド管理',
-    type: 1, // CHAT_INPUT
+    type: 1,
     options: [
-      { type: 1, name: 'find', description: '同じサーバー内からフレンド候補を探す' },
-      { type: 1, name: 'invite', description: 'サーバー外ユーザー向けの招待URLを発行する' },
+      { type: 1, name: 'code', description: 'フレンド追加用コードを発行（7日間有効）' },
       {
         type: 1,
-        name: 'accept',
-        description: '招待トークンでフレンド追加する',
-        options: [{ type: 3, name: 'token', description: '招待トークン', required: true }],
+        name: 'request',
+        description: 'コードを使ってフレンド申請を送る',
+        options: [{ type: 3, name: 'code', description: '相手から受け取った8文字コード', required: true }],
       },
+      { type: 1, name: 'list', description: '現在のフレンド一覧を表示' },
+      { type: 1, name: 'pending', description: '届いているフレンド申請を表示' },
     ],
     dm_permission: true,
     contexts: [1, 2],
@@ -96,4 +95,3 @@ registerGlobalCommands().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-

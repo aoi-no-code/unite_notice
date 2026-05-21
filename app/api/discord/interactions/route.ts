@@ -1,11 +1,19 @@
 import { waitUntil } from '@vercel/functions';
 import { NextRequest } from 'next/server';
 import { verifyDiscordRequest } from '../../../../lib/verify';
-import { acceptFriendInvite, buildFriendInviteUrl } from '@/lib/discordFriendInvite';
+import {
+  approveFriendRequest,
+  createFriendCode,
+  formatFriendListLines,
+  formatPendingRequestLine,
+  listDiscordFriends,
+  listPendingFriendRequests,
+  rejectFriendRequest,
+  submitFriendRequest,
+} from '@/lib/discordFriends';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchLatestBattleAt, fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
 import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
-import { randomBytes } from 'crypto';
 
 const InteractionType = {
   PING: 1,
@@ -206,20 +214,6 @@ async function getFriendDiscordIds(discordUserId: string): Promise<Set<string>> 
   return friendIds;
 }
 
-async function upsertFriendship(a: string, b: string, source: 'same_guild' | 'invite_link') {
-  if (a === b) return;
-  const svc = getServiceClient();
-  const { low, high } = pairDiscordIds(a, b);
-  await svc.from('discord_friendships').upsert(
-    {
-      user_low_discord_id: low,
-      user_high_discord_id: high,
-      source,
-    },
-    { onConflict: 'user_low_discord_id,user_high_discord_id' }
-  );
-}
-
 async function notifyUsers(senderDiscordUserId: string, targetDiscordUserIds: string[]) {
   const errors: string[] = [];
   for (const discordUserId of targetDiscordUserIds) {
@@ -335,7 +329,7 @@ export async function POST(req: NextRequest) {
       const embed = {
         title: '🎮 UniteFriendsへようこそ！',
         description:
-          'このBotは、ポケモンユナイトで\n「今誘えそうなフレンド」を見つけるためのBotです。\n\nサーバー内では登録通知を流さず、\n登録・検索・通知設定はすべてBotとの個別DMで行います。\n\n使い方：\n1. BotとのDMを開く\n2. /register でゲーム内IDを登録\n3. /friend find で同じサーバー内フレンドを追加\n4. サーバー外フレンドは /friend invite のURL経由で追加\n5. /play で今誘えそうなフレンドを検索',
+          'このBotは、ポケモンユナイトで\n「今誘えそうなフレンド」を見つけるためのBotです。\n\nサーバー内では登録通知を流さず、\n登録・検索・通知設定はすべてBotとの個別DMで行います。\n\n使い方：\n1. BotとのDMを開く\n2. /register でゲーム内IDを登録\n3. /friend code でフレンド追加用コードを発行\n4. 相手に /friend request コード で申請してもらう\n5. 届いた申請を承認（DMのボタンまたは /friend pending）\n6. /play で今誘えそうなフレンドを検索',
         color: 0x5865f2,
       };
       const components = [
@@ -464,7 +458,7 @@ export async function POST(req: NextRequest) {
 
       const guildId = guildIds[0];
       const candidates = await buildPlayCandidates(guildId, userDiscordId);
-      if (candidates.length === 0) return ephemeral('フレンドの中で直近プレイ候補が見つかりませんでした。先に /friend find または /friend invite を利用してください。');
+      if (candidates.length === 0) return ephemeral('フレンドの中で直近プレイ候補が見つかりませんでした。先に /friend code でフレンドを追加してください。');
       const embed = {
         title: '🎮 今誘えそうな候補',
         description: candidates
@@ -500,76 +494,83 @@ export async function POST(req: NextRequest) {
       if (!isDm) return ephemeral('/friend はDM専用です。');
       const sub = data?.data?.options?.[0]?.name as string | undefined;
 
-      if (sub === 'find') {
-        const guilds = await getUserGuildsForDm(userDiscordId);
-        if (guilds.length === 0) return ephemeral('対象サーバーが見つかりません。');
-        const guildId = guilds[0].id;
-        const svc = getServiceClient();
-        const guildMemberIds = await getGuildMemberDiscordUserIds(guildId, userDiscordId);
-        if (guildMemberIds.length === 0) return ephemeral('同じサーバー内で候補が見つかりませんでした。');
-        const { data: rows } = await svc
-          .from('discord_user_game_profiles')
-          .select('discord_user_id,unite_player_id')
-          .in('discord_user_id', guildMemberIds)
-          .limit(25);
-        const friendIds = await getFriendDiscordIds(userDiscordId);
-        const candidates = (rows ?? []).filter((row) => !friendIds.has(row.discord_user_id as string));
-        if (candidates.length === 0) {
-          return ephemeral('同じサーバー内で新規に追加できる候補が見つかりませんでした。サーバー外の相手は /friend invite でURL招待してください。');
-        }
-        return ephemeral('同じサーバーの候補です。フレンド追加する相手を選んでください。', [
-          {
-            type: 1,
-            components: [
-              {
-                type: 3,
-                custom_id: `friend:add:${guildId}`,
-                placeholder: 'フレンド追加する相手',
-                options: candidates.map((row) => ({
-                  label: `${row.unite_player_id as string}`.slice(0, 100),
-                  value: row.discord_user_id as string,
-                })),
-              },
-            ],
-          },
-        ]);
-      }
-
-      if (sub === 'invite') {
-        const guilds = await getUserGuildsForDm(userDiscordId);
-        const guildId = guilds[0]?.id ?? process.env.DISCORD_GUILD_ID ?? null;
-        const token = randomBytes(12).toString('hex');
-        const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString();
-        const svc = getServiceClient();
-        await svc.from('discord_friend_invites').insert({
-          token,
-          inviter_discord_user_id: userDiscordId,
-          guild_id: guildId,
-          expires_at: expiresAt,
-        });
-        const inviteUrl = buildFriendInviteUrl(token);
+      if (sub === 'code') {
+        const { code, expiresAt } = await createFriendCode(userDiscordId);
+        const expires = new Date(expiresAt).toLocaleString('ja-JP');
         return ephemeral(
-          `フレンド招待リンクを発行しました（7日間有効）。\n\n${inviteUrl}\n\n相手にこのURLを送ってください。開いて「Discordで承認」すればフレンド追加されます。\n\n手動で受け付ける場合:\n/friend accept ${token}`
+          `フレンド追加用コードを発行しました（7日間有効）。\n\nコード: **${code}**\n\n相手には Bot の DM で次を実行してもらってください:\n/friend request ${code}\n\n申請が届いたら DM に通知が来ます。`
         );
       }
 
-      if (sub === 'accept') {
-        const token = data?.data?.options?.[0]?.options?.find((o: { name?: string; value?: string }) => o.name === 'token')?.value;
-        if (!token || typeof token !== 'string') return ephemeral('token を指定してください。');
-        const result = await acceptFriendInvite(token, userDiscordId);
+      if (sub === 'request') {
+        const rawCode = data?.data?.options?.[0]?.options?.find((o: { name?: string; value?: string }) => o.name === 'code')?.value;
+        if (!rawCode || typeof rawCode !== 'string') return ephemeral('code を指定してください。');
+        const result = await submitFriendRequest(userDiscordId, rawCode);
         if (!result.ok) {
           const messages: Record<string, string> = {
-            not_found: '招待トークンが見つかりません。',
-            used: 'この招待トークンはすでに使用済みです。',
-            expired: 'この招待トークンは有効期限切れです。',
-            self: '自分の招待URLは受け付けられません。',
+            invalid_code: 'コードが見つかりません。形式は8文字の英数字です。',
+            expired: 'このコードは有効期限切れです。相手に /friend code で再発行してもらってください。',
+            self: '自分のコードには申請できません。',
+            already_friends: 'すでにフレンドです。',
+            already_pending: '同じ相手への申請が保留中です。',
+            owner_not_registered: 'コードの発行者がまだ /register していません。',
+            requester_not_registered: '先に /register でゲーム内IDを登録してください。',
           };
-          return ephemeral(messages[result.reason] ?? 'フレンド追加に失敗しました。');
+          return ephemeral(messages[result.reason] ?? '申請に失敗しました。');
         }
-        return ephemeral('フレンド登録が完了しました。/play でフレンド候補を探せます。');
+        const svc = getServiceClient();
+        const { data: requesterProfile } = await svc
+          .from('discord_user_game_profiles')
+          .select('unite_player_id,trainer_name')
+          .eq('discord_user_id', userDiscordId)
+          .maybeSingle();
+        const label =
+          (requesterProfile?.trainer_name as string | null) ||
+          (requesterProfile?.unite_player_id as string | null) ||
+          userDiscordId;
+        try {
+          await sendDiscordDM(result.ownerDiscordUserId, {
+            content: `🎮 **フレンド申請**が届きました\n<@${userDiscordId}> さん（${label}）から申請があります。`,
+            components: [
+              {
+                type: 1,
+                components: [
+                  { type: 2, style: 3, label: '承認', custom_id: `friend:req:approve:${result.requestId}` },
+                  { type: 2, style: 4, label: '拒否', custom_id: `friend:req:reject:${result.requestId}` },
+                ],
+              },
+            ],
+          });
+        } catch {
+          return ephemeral(
+            '申請は登録しましたが、相手への DM を送れませんでした。相手に /friend pending を実行してもらってください。'
+          );
+        }
+        return ephemeral('フレンド申請を送信しました。相手が承認するとフレンドになります。');
       }
 
-      return ephemeral('未対応の /friend サブコマンドです。');
+      if (sub === 'list') {
+        const friends = await listDiscordFriends(userDiscordId);
+        return ephemeral(`**フレンド一覧**（${friends.length}人）\n${formatFriendListLines(friends)}`);
+      }
+
+      if (sub === 'pending') {
+        const pending = await listPendingFriendRequests(userDiscordId);
+        if (pending.length === 0) return ephemeral('保留中のフレンド申請はありません。');
+        const lines = pending.map((p) => formatPendingRequestLine(p)).join('\n');
+        const components = pending.slice(0, 5).flatMap((p) => [
+          {
+            type: 1,
+            components: [
+              { type: 2, style: 3, label: '承認', custom_id: `friend:req:approve:${p.id}` },
+              { type: 2, style: 4, label: '拒否', custom_id: `friend:req:reject:${p.id}` },
+            ],
+          },
+        ]);
+        return ephemeral(`**保留中の申請**（${pending.length}件）\n${lines}`, components);
+      }
+
+      return ephemeral('未対応の /friend サブコマンドです。/friend code / request / list / pending を利用してください。');
     }
 
     return ephemeral('未対応のコマンドです');
@@ -584,7 +585,7 @@ export async function POST(req: NextRequest) {
 
     if (customId === 'unite:setup_open_dm') {
       const dmText =
-        '🎮 UniteFriendsへようこそ！\n\nまずはあなたのポケモンユナイトのゲーム内IDを登録してください。\n\n/register ゲーム内ID\n\n登録後は\n/play\nで、同じサーバーにいる登録済みユーザーの中から\n最近対戦している人を探せます。\n\n注意点：\n- サーバーチャンネルに個人の登録通知は流さない\n- 登録・検索・通知設定はDM内で完結させる\n- DMが送れない場合は「Discordのプライバシー設定でDMを許可してください」\n- 通知を受け取りたくない場合は /notify off で停止できます。';
+        '🎮 UniteFriendsへようこそ！\n\nまずは /register ゲーム内ID で登録してください。\n\nフレンド追加:\n1. /friend code でコード発行\n2. 相手に /friend request コード を実行してもらう\n3. DMの通知から承認\n\n/play でフレンドのプレイ状況を確認できます。';
       try {
         await sendDiscordDM(userDiscordId, { content: dmText });
         return ephemeral('DMを送信しました。DM内で `/register` を実行してください。');
@@ -601,28 +602,52 @@ export async function POST(req: NextRequest) {
       return ephemeral(`登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`);
     }
 
-    if (customId.startsWith('friend:add:')) {
-      const guildId = customId.replace('friend:add:', '');
-      const targetDiscordUserId = selectedValues[0];
-      if (!targetDiscordUserId) return ephemeral('追加する相手を選択してください。');
-      const svc = getServiceClient();
-      const { data: member } = await svc
-        .from('discord_guild_members')
-        .select('discord_user_id')
-        .eq('guild_id', guildId)
-        .eq('discord_user_id', targetDiscordUserId)
-        .maybeSingle();
-      if (!member) {
-        return ephemeral('同じサーバー内のユーザーのみ追加できます。サーバー外の相手は /friend invite を使ってください。');
+    if (customId.startsWith('friend:req:approve:')) {
+      const requestId = customId.replace('friend:req:approve:', '');
+      const result = await approveFriendRequest(requestId, userDiscordId);
+      if (!result.ok) {
+        const messages: Record<string, string> = {
+          not_found: '申請が見つかりません。',
+          not_owner: 'この申請を承認する権限がありません。',
+          not_pending: 'この申請はすでに処理済みです。',
+          already_friends: 'すでにフレンドです。',
+        };
+        return ephemeral(messages[result.reason] ?? '承認に失敗しました。');
       }
-      const { data: profile } = await svc
-        .from('discord_user_game_profiles')
-        .select('discord_user_id')
-        .eq('discord_user_id', targetDiscordUserId)
+      try {
+        await sendDiscordDM(result.requesterDiscordUserId, {
+          content: '🎮 フレンド申請が**承認**されました。/play でプレイ状況を確認できます。',
+        });
+      } catch {
+        // DM 失敗は握りつぶす
+      }
+      return ephemeral(
+        `フレンド申請を承認しました。\n\n**フレンド一覧**（${result.friends.length}人）\n${formatFriendListLines(result.friends)}`
+      );
+    }
+
+    if (customId.startsWith('friend:req:reject:')) {
+      const requestId = customId.replace('friend:req:reject:', '');
+      const svc = getServiceClient();
+      const { data: req } = await svc
+        .from('discord_friend_requests')
+        .select('requester_discord_user_id')
+        .eq('id', requestId)
         .maybeSingle();
-      if (!profile) return ephemeral('このユーザーはまだゲーム内IDを登録していません。');
-      await upsertFriendship(userDiscordId, targetDiscordUserId, 'same_guild');
-      return ephemeral('フレンド追加しました。/play で検索できます。');
+      const result = await rejectFriendRequest(requestId, userDiscordId);
+      if (!result.ok) {
+        return ephemeral('申請の拒否に失敗しました。すでに処理済みの可能性があります。');
+      }
+      if (req?.requester_discord_user_id) {
+        try {
+          await sendDiscordDM(req.requester_discord_user_id as string, {
+            content: '🎮 フレンド申請は拒否されました。',
+          });
+        } catch {
+          // ignore
+        }
+      }
+      return ephemeral('フレンド申請を拒否しました。');
     }
 
     if (customId === 'unite:check_now') {

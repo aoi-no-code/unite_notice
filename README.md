@@ -4,66 +4,46 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 
 ### Tech Stack
 
-- Next.js 14（API Routes のみ。Web UI なし）
+- Next.js 14（API Routes のみ）
 - Supabase（Postgres）
 - Discord Bot（Slash Commands + Component Interactions）
 
 ### セットアップ
 
-1. **Discord Developer Portal**
-   - アプリ + Bot 作成、Bot をサーバーに招待
-   - `PUBLIC KEY` を控える
-   - Interactions Endpoint: `https://<ドメイン>/api/discord/interactions`
-2. **Supabase**
-   - `supabase/schema.sql` を実行（Discord 用テーブル）
-   - 本番では `20260430_drop_public_users.sql` 済み想定（Web 用 `users` は不要）
-3. **環境変数**
-   - `env.sample` を `.env.local` にコピーして設定
-   - Vercel にも同様に設定
-4. **Slash Commands**
-   - ギルド: `npm run discord:register-commands`（`/setup`）
-   - グローバル: `npm run discord:register-global-commands`（`/register`, `/play`, `/notify`, `/friend`）
+1. Discord Developer Portal … Bot、Interactions Endpoint、トークン類
+2. Supabase … `supabase/schema.sql` + migrations
+3. 環境変数 … `env.sample` 参照
+4. コマンド登録 … `npm run discord:register-commands` / `discord:register-global-commands`
 
-### 環境変数（主要）
+### フレンド追加（DM のみ）
 
-- `APP_BASE_URL` … 本番 URL（Interactions・招待リンク用）
-- `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_GUILD_ID`
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
-- `INTERNAL_SHARED_SECRET`, `POLL_WINDOW_MINUTES`, `UNITEAPI_BASE`
+1. **A** が DM で `/friend code` → 8文字コード（7日有効）を **B** に伝える
+2. **B** が Bot の DM で `/friend request <コード>`
+3. **A** に DM で申請通知（承認 / 拒否ボタン）
+4. **A** が承認 → **フレンド一覧**を表示。`/friend list` でも確認可能
 
-### フレンド招待リンク（最小 Web）
-
-1. DM で `/friend invite` → `https://<ドメイン>/friend/<token>` を共有
-2. 相手が URL を開き「Discord で承認」→ OAuth 後に自動で `discord_friendships` に追加
-3. Discord Developer Portal → OAuth2 → Redirects に追加:
-   - `https://<ドメイン>/api/friend-invites/callback`
-
-### Discord コマンド（DM 中心）
+### Discord コマンド
 
 | コマンド | 説明 |
 |----------|------|
-| `/setup` | サーバー内案内（管理者・サーバーのみ） |
 | `/register` | ゲーム内 ID 登録 |
-| `/friend find` | 同じサーバー内からフレンド追加 |
-| `/friend invite` | 招待リンク発行（7日有効） |
-| `/friend accept` | 招待トークンでフレンド追加（手動） |
-| `/play` | フレンドの直近プレイ候補を検索 |
+| `/friend code` | フレンド追加用コード発行 |
+| `/friend request` | コードでフレンド申請 |
+| `/friend pending` | 保留中の申請一覧 |
+| `/friend list` | フレンド一覧 |
+| `/play` | フレンドの直近プレイ候補 |
 | `/notify on\|off` | 通知 ON/OFF |
+| `/setup` | サーバー内案内（管理者） |
 
-### API
+### 環境変数
 
-- `POST /api/discord/interactions` … Discord Interactions
-- `POST /api/unite/ping` … 内部用ポーリング（`x-internal-secret` + `owner_discord_id`）
+- `APP_BASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
+- `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`
+- `INTERNAL_SHARED_SECRET`, `POLL_WINDOW_MINUTES`, `UNITEAPI_BASE`
 
-### データ（Discord 用）
+### Supabase マイグレーション（本番）
 
-- `discord_users`, `discord_user_game_profiles`
-- `discord_guilds`, `discord_guild_members`
-- `discord_friendships`, `discord_friend_invites`
+順に実行:
 
-### ライブラリ
-
-- `lib/unite.ts` … UniteAPI からプロフィール取得
-- `lib/discord.ts` … Discord API
-- `lib/unitePing.ts` … `discord_friendships` ベースの通知
-- `lib/db.ts` … Supabase サービスロール
+1. `20260521_add_unite_api_uid.sql`
+2. `20260522_discord_friend_requests.sql`
