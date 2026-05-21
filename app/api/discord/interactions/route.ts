@@ -510,48 +510,82 @@ export async function POST(req: NextRequest) {
       if (sub === 'request') {
         const rawCode = data?.data?.options?.[0]?.options?.find((o: { name?: string; value?: string }) => o.name === 'code')?.value;
         if (!rawCode || typeof rawCode !== 'string') return ephemeral('code を指定してください。');
-        const result = await submitFriendRequest(userDiscordId, rawCode);
-        if (!result.ok) {
-          const messages: Record<string, string> = {
-            invalid_code: 'コードが見つかりません。形式は8文字の英数字です。',
-            expired: 'このコードは有効期限切れです。相手に /friend code で再発行してもらってください。',
-            self: '自分のコードには申請できません。',
-            already_friends: 'すでにフレンドです。',
-            already_pending: '同じ相手への申請が保留中です。',
-            owner_not_registered: 'コードの発行者がまだ /register していません。',
-            requester_not_registered: '先に /register でゲーム内IDを登録してください。',
-          };
-          return ephemeral(messages[result.reason] ?? '申請に失敗しました。');
+        const applicationId: string | undefined = data?.application_id;
+        const interactionToken: string | undefined = data?.token;
+        if (!applicationId || !interactionToken) {
+          return ephemeral('申請レスポンスの情報を取得できませんでした。再実行してください。');
         }
-        const svc = getServiceClient();
-        const { data: requesterProfile } = await svc
-          .from('discord_user_game_profiles')
-          .select('unite_player_id,trainer_name')
-          .eq('discord_user_id', userDiscordId)
-          .maybeSingle();
-        const label =
-          (requesterProfile?.trainer_name as string | null) ||
-          (requesterProfile?.unite_player_id as string | null) ||
-          userDiscordId;
-        try {
-          await sendDiscordDM(result.ownerDiscordUserId, {
-            content: `🎮 **フレンド申請**が届きました\n<@${userDiscordId}> さん（${label}）から申請があります。`,
-            components: [
-              {
-                type: 1,
-                components: [
-                  { type: 2, style: 3, label: '承認', custom_id: `friend:req:approve:${result.requestId}` },
-                  { type: 2, style: 4, label: '拒否', custom_id: `friend:req:reject:${result.requestId}` },
-                ],
-              },
-            ],
-          });
-        } catch {
-          return ephemeral(
-            '申請は登録しましたが、相手への DM を送れませんでした。相手に /friend pending を実行してもらってください。'
-          );
-        }
-        return ephemeral('フレンド申請を送信しました。相手が承認するとフレンドになります。');
+
+        const friendRequestErrorMessages: Record<string, string> = {
+          invalid_code: 'コードが見つかりません。形式は8文字の英数字です。',
+          expired: 'このコードは有効期限切れです。相手に /friend code で再発行してもらってください。',
+          self: '自分のコードには申請できません。',
+          already_friends: 'すでにフレンドです。',
+          already_pending: '同じ相手への申請が保留中です。',
+          owner_not_registered: 'コードの発行者がまだ /register していません。',
+          requester_not_registered: '先に /register でゲーム内IDを登録してください。',
+        };
+
+        waitUntil(
+          (async () => {
+            try {
+              const result = await submitFriendRequest(userDiscordId, rawCode);
+              if (!result.ok) {
+                await sendInteractionFollowup(applicationId, interactionToken, {
+                  content: friendRequestErrorMessages[result.reason] ?? '申請に失敗しました。',
+                  flags: 64,
+                });
+                return;
+              }
+              const svc = getServiceClient();
+              const { data: requesterProfile } = await svc
+                .from('discord_user_game_profiles')
+                .select('unite_player_id,trainer_name')
+                .eq('discord_user_id', userDiscordId)
+                .maybeSingle();
+              const label =
+                (requesterProfile?.trainer_name as string | null) ||
+                (requesterProfile?.unite_player_id as string | null) ||
+                userDiscordId;
+              try {
+                await sendDiscordDM(result.ownerDiscordUserId, {
+                  content: `🎮 **フレンド申請**が届きました\n<@${userDiscordId}> さん（${label}）から申請があります。`,
+                  components: [
+                    {
+                      type: 1,
+                      components: [
+                        { type: 2, style: 3, label: '承認', custom_id: `friend:req:approve:${result.requestId}` },
+                        { type: 2, style: 4, label: '拒否', custom_id: `friend:req:reject:${result.requestId}` },
+                      ],
+                    },
+                  ],
+                });
+              } catch {
+                await sendInteractionFollowup(applicationId, interactionToken, {
+                  content:
+                    '申請は登録しましたが、相手への DM を送れませんでした。相手に /friend pending を実行してもらってください。',
+                  flags: 64,
+                });
+                return;
+              }
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: 'フレンド申請を送信しました。相手が承認するとフレンドになります。',
+                flags: 64,
+              });
+            } catch (err) {
+              console.log('[discord][interactions] friend request followup failed', err);
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: '申請中にエラーが発生しました。少し待ってから再実行してください。',
+                flags: 64,
+              }).catch(() => {});
+            }
+          })()
+        );
+
+        return jsonResponse({
+          type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+          data: { flags: 64 },
+        });
       }
 
       if (sub === 'list') {
@@ -619,50 +653,108 @@ export async function POST(req: NextRequest) {
 
     if (customId.startsWith('friend:req:approve:')) {
       const requestId = customId.replace('friend:req:approve:', '');
-      const result = await approveFriendRequest(requestId, userDiscordId);
-      if (!result.ok) {
-        const messages: Record<string, string> = {
-          not_found: '申請が見つかりません。',
-          not_owner: 'この申請を承認する権限がありません。',
-          not_pending: 'この申請はすでに処理済みです。',
-          already_friends: 'すでにフレンドです。',
-        };
-        return ephemeral(messages[result.reason] ?? '承認に失敗しました。');
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('承認レスポンスの情報を取得できませんでした。再実行してください。');
       }
-      try {
-        await sendDiscordDM(result.requesterDiscordUserId, {
-          content: '🎮 フレンド申請が**承認**されました。/play でプレイ状況を確認できます。',
-        });
-      } catch {
-        // DM 失敗は握りつぶす
-      }
-      return ephemeral(
-        `フレンド申請を承認しました。\n\n**フレンド一覧**（${result.friends.length}人）\n${formatFriendListLines(result.friends)}`
+      const approveErrorMessages: Record<string, string> = {
+        not_found: '申請が見つかりません。',
+        not_owner: 'この申請を承認する権限がありません。',
+        not_pending: 'この申請はすでに処理済みです。',
+        already_friends: 'すでにフレンドです。',
+      };
+
+      waitUntil(
+        (async () => {
+          try {
+            const result = await approveFriendRequest(requestId, userDiscordId);
+            if (!result.ok) {
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: approveErrorMessages[result.reason] ?? '承認に失敗しました。',
+                flags: 64,
+              });
+              return;
+            }
+            try {
+              await sendDiscordDM(result.requesterDiscordUserId, {
+                content: '🎮 フレンド申請が**承認**されました。/play でプレイ状況を確認できます。',
+              });
+            } catch {
+              // DM 失敗は握りつぶす
+            }
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: `フレンド申請を承認しました。\n\n**フレンド一覧**（${result.friends.length}人）\n${formatFriendListLines(result.friends)}`,
+              flags: 64,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] friend approve followup failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: '承認中にエラーが発生しました。少し待ってから再実行してください。',
+              flags: 64,
+            }).catch(() => {});
+          }
+        })()
       );
+
+      return jsonResponse({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
 
     if (customId.startsWith('friend:req:reject:')) {
       const requestId = customId.replace('friend:req:reject:', '');
-      const svc = getServiceClient();
-      const { data: req } = await svc
-        .from('discord_friend_requests')
-        .select('requester_discord_user_id')
-        .eq('id', requestId)
-        .maybeSingle();
-      const result = await rejectFriendRequest(requestId, userDiscordId);
-      if (!result.ok) {
-        return ephemeral('申請の拒否に失敗しました。すでに処理済みの可能性があります。');
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('拒否レスポンスの情報を取得できませんでした。再実行してください。');
       }
-      if (req?.requester_discord_user_id) {
-        try {
-          await sendDiscordDM(req.requester_discord_user_id as string, {
-            content: '🎮 フレンド申請は拒否されました。',
-          });
-        } catch {
-          // ignore
-        }
-      }
-      return ephemeral('フレンド申請を拒否しました。');
+
+      waitUntil(
+        (async () => {
+          try {
+            const svc = getServiceClient();
+            const { data: req } = await svc
+              .from('discord_friend_requests')
+              .select('requester_discord_user_id')
+              .eq('id', requestId)
+              .maybeSingle();
+            const result = await rejectFriendRequest(requestId, userDiscordId);
+            if (!result.ok) {
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: '申請の拒否に失敗しました。すでに処理済みの可能性があります。',
+                flags: 64,
+              });
+              return;
+            }
+            if (req?.requester_discord_user_id) {
+              try {
+                await sendDiscordDM(req.requester_discord_user_id as string, {
+                  content: '🎮 フレンド申請は拒否されました。',
+                });
+              } catch {
+                // ignore
+              }
+            }
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: 'フレンド申請を拒否しました。',
+              flags: 64,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] friend reject followup failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: '拒否中にエラーが発生しました。少し待ってから再実行してください。',
+              flags: 64,
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
 
     if (customId === 'unite:check_now') {
