@@ -1,3 +1,4 @@
+import { waitUntil } from '@vercel/functions';
 import { NextRequest } from 'next/server';
 import { verifyDiscordRequest } from '../../../../lib/verify';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
@@ -297,17 +298,19 @@ export async function POST(req: NextRequest) {
 
   // 受信イベントごとに、可能ならGuildコンテキストを記録する
   // Discordはインタラクション応答を短時間で返す必要があるため、
-  // 追跡処理は応答ブロックしない（失敗はログ出して握りつぶす）
-  void trackGuildContext(data).catch((err) => {
-    const anyErr = err as any;
-    console.log('[discord][interactions] trackGuildContext failed', {
-      isError: err instanceof Error,
-      message: (err instanceof Error ? err.message : undefined) ?? anyErr?.message ?? anyErr?.error_description,
-      code: anyErr?.code,
-      status: anyErr?.status,
-      raw: anyErr,
-    });
-  });
+  // 追跡処理は応答ブロックしない（Vercel では waitUntil でレスポンス後も実行を継続）
+  waitUntil(
+    trackGuildContext(data).catch((err) => {
+      const anyErr = err as any;
+      console.log('[discord][interactions] trackGuildContext failed', {
+        isError: err instanceof Error,
+        message: (err instanceof Error ? err.message : undefined) ?? anyErr?.message ?? anyErr?.error_description,
+        code: anyErr?.code,
+        status: anyErr?.status,
+        raw: anyErr,
+      });
+    })
+  );
 
   // APPLICATION_COMMAND
   if (data?.type === InteractionType.APPLICATION_COMMAND) {
@@ -373,30 +376,34 @@ export async function POST(req: NextRequest) {
         return ephemeral('登録レスポンスの情報を取得できませんでした。再実行してください。');
       }
 
-      void (async () => {
-        try {
-          const guilds = await getUserGuildsForDm(userDiscordId);
-          if (guilds.length === 0) {
+      waitUntil(
+        (async () => {
+          try {
+            console.log('[discord][interactions] register followup start', { userDiscordId, unitePlayerId });
+            const guilds = await getUserGuildsForDm(userDiscordId);
+            if (guilds.length === 0) {
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: '参加中サーバーが見つかりません。先にサーバー内でBotコマンドを一度実行してください。',
+                flags: 64,
+              });
+              return;
+            }
+            const result = await upsertRegistration(userDiscordId, unitePlayerId);
+            const profileLine = buildRegisterProfileLine(result);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: '参加中サーバーが見つかりません。先にサーバー内でBotコマンドを一度実行してください。',
+              content: `登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`,
               flags: 64,
             });
-            return;
+            console.log('[discord][interactions] register followup done', { userDiscordId, unitePlayerId });
+          } catch (err) {
+            console.log('[discord][interactions] register followup failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: '登録中にエラーが発生しました。少し待ってから再実行してください。',
+              flags: 64,
+            }).catch(() => {});
           }
-          const result = await upsertRegistration(userDiscordId, unitePlayerId);
-          const profileLine = buildRegisterProfileLine(result);
-          await sendInteractionFollowup(applicationId, interactionToken, {
-            content: `登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`,
-            flags: 64,
-          });
-        } catch (err) {
-          console.log('[discord][interactions] register followup failed', err);
-          await sendInteractionFollowup(applicationId, interactionToken, {
-            content: '登録中にエラーが発生しました。少し待ってから再実行してください。',
-            flags: 64,
-          }).catch(() => {});
-        }
-      })();
+        })()
+      );
 
       return jsonResponse({
         type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
