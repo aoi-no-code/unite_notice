@@ -297,8 +297,6 @@ export async function POST(req: NextRequest) {
     guild_id: data?.guild_id,
     isDM: !data?.guild_id,
   });
-  const appBaseUrl = process.env.APP_BASE_URL || '';
-
   // PING
   if (data?.type === InteractionType.PING) {
     return jsonResponse({ type: InteractionResponseType.PONG });
@@ -549,7 +547,7 @@ export async function POST(req: NextRequest) {
           expires_at: expiresAt,
         });
         return ephemeral(
-          `サーバー外ユーザー用のフレンド招待URLです（7日間有効）。\n${appBaseUrl}/friend/${token}\n\n相手にはこのURLと一緒に「DMで /friend accept ${token} を実行」と伝えてください。`
+          `フレンド招待トークンを発行しました（7日間有効）。\n\n相手の Bot DM で次を実行してもらってください:\n/friend accept ${token}`
         );
       }
 

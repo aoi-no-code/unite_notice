@@ -10,7 +10,6 @@
     "discord:register-global-commands": "node scripts/register-commands-global.mjs"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "2.49.1",
     "@vercel/functions": "^3.6.0",
     "dotenv": "^17.4.2",
