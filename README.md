@@ -31,6 +31,7 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 | `/friend request` | コードでフレンド申請 |
 | `/friend pending` | 保留中の申請一覧 |
 | `/friend list` | フレンド一覧 |
+| `/friend manage` | フレンド整理（ボタンで削除） |
 | `/play` | フレンドの最新対戦（時間・パーティ）を表示し、誘い DM を送る |
 | `/notify on\|off` | 通知 ON/OFF |
 | `/setup` | サーバー内案内（管理者） |

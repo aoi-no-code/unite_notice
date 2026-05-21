@@ -10,8 +10,10 @@ import {
   listDiscordFriends,
   listPendingFriendRequests,
   rejectFriendRequest,
+  removeDiscordFriend,
   submitFriendRequest,
 } from '@/lib/discordFriends';
+import { buildFriendManagePayload } from '@/lib/discordFriendManageUi';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
 import {
@@ -497,6 +499,11 @@ export async function POST(req: NextRequest) {
         return ephemeral(`**フレンド一覧**（${friends.length}人）\n${formatFriendListLines(friends)}`);
       }
 
+      if (sub === 'manage') {
+        const friends = await listDiscordFriends(userDiscordId);
+        return ephemeralData(buildFriendManagePayload(friends));
+      }
+
       if (sub === 'pending') {
         const pending = await listPendingFriendRequests(userDiscordId);
         if (pending.length === 0) return ephemeral('保留中のフレンド申請はありません。');
@@ -513,7 +520,9 @@ export async function POST(req: NextRequest) {
         return ephemeral(`**保留中の申請**（${pending.length}件）\n${lines}`, components);
       }
 
-      return ephemeral('未対応の /friend サブコマンドです。/friend code / request / list / pending を利用してください。');
+      return ephemeral(
+        '未対応の /friend サブコマンドです。/friend code / request / list / manage / pending を利用してください。'
+      );
     }
 
     return ephemeral('未対応のコマンドです');
@@ -553,6 +562,25 @@ export async function POST(req: NextRequest) {
       } catch {
         return ephemeral('コードを送れませんでした。Discordのプライバシー設定でDMを許可してください。');
       }
+    }
+
+    if (customId.startsWith('friend:remove:')) {
+      const friendDiscordUserId = customId.replace('friend:remove:', '');
+      if (!friendDiscordUserId) return ephemeral('削除対象が不正です。');
+      const result = await removeDiscordFriend(userDiscordId, friendDiscordUserId);
+      if (!result.ok) {
+        const messages: Record<string, string> = {
+          self: '自分自身は削除できません。',
+          not_friends: 'このユーザーはフレンドではありません。',
+        };
+        return ephemeral(messages[result.reason] ?? '削除に失敗しました。');
+      }
+      const friends = await listDiscordFriends(userDiscordId);
+      const payload = buildFriendManagePayload(friends, `**${result.displayName}** をフレンドから外しました。`);
+      return jsonResponse({
+        type: InteractionResponseType.UPDATE_MESSAGE,
+        data: payload,
+      });
     }
 
     if (customId.startsWith('friend:req:approve:')) {

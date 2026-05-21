@@ -58,6 +58,7 @@ const commands = [
         options: [{ type: 3, name: 'code', description: '相手から受け取った8文字コード', required: true }],
       },
       { type: 1, name: 'list', description: '現在のフレンド一覧を表示' },
+      { type: 1, name: 'manage', description: 'フレンド一覧から削除して整理' },
       { type: 1, name: 'pending', description: '届いているフレンド申請を表示' },
     ],
     dm_permission: true,

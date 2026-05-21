@@ -248,6 +248,33 @@ export async function approveFriendRequest(
   return { ok: true, friends, requesterDiscordUserId };
 }
 
+export async function removeDiscordFriend(
+  ownerDiscordUserId: string,
+  friendDiscordUserId: string
+): Promise<
+  | { ok: true; displayName: string }
+  | { ok: false; reason: 'self' | 'not_friends' }
+> {
+  if (ownerDiscordUserId === friendDiscordUserId) return { ok: false, reason: 'self' };
+  if (!(await areDiscordFriends(ownerDiscordUserId, friendDiscordUserId))) {
+    return { ok: false, reason: 'not_friends' };
+  }
+
+  const profileMap = await getProfileMap([friendDiscordUserId]);
+  const profile = profileMap.get(friendDiscordUserId);
+  const displayName = formatRequesterDisplayName(profile?.trainerName, profile?.unitePlayerId);
+
+  const { low, high } = pairDiscordIds(ownerDiscordUserId, friendDiscordUserId);
+  const svc = getServiceClient();
+  await svc
+    .from('discord_friendships')
+    .delete()
+    .eq('user_low_discord_id', low)
+    .eq('user_high_discord_id', high);
+
+  return { ok: true, displayName };
+}
+
 export async function rejectFriendRequest(
   requestId: string,
   ownerDiscordUserId: string
