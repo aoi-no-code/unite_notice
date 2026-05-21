@@ -708,7 +708,7 @@ export async function POST(req: NextRequest) {
               failed.length > 0 ? `\n\n誘えなかった相手: ${failed.slice(0, 5).join('、')}` : '';
             const content =
               invited.length > 0
-                ? `**${invited.join('、')}** を誘いました。${failLine}`
+                ? `**${invited.join('、')}** に誘ってみたよ。${failLine}`
                 : `誘えた相手がいませんでした。${failLine}`;
             await sendInteractionFollowup(applicationId, interactionToken, {
               content,
@@ -753,7 +753,7 @@ export async function POST(req: NextRequest) {
             const targetName = await getPlaySenderDisplayName(targetDiscordUserId);
             await sendDiscordDM(targetDiscordUserId, buildPlayInvitePayload(senderName, userDiscordId));
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: `**${targetName}** を誘いました。`,
+              content: `**${targetName}** に誘ってみたよ。`,
               flags: 64,
             });
           } catch (err) {
