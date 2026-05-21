@@ -1,6 +1,7 @@
 import { waitUntil } from '@vercel/functions';
 import { NextRequest } from 'next/server';
 import { verifyDiscordRequest } from '../../../../lib/verify';
+import { acceptFriendInvite, buildFriendInviteUrl } from '@/lib/discordFriendInvite';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchLatestBattleAt, fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
 import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
@@ -546,30 +547,25 @@ export async function POST(req: NextRequest) {
           guild_id: guildId,
           expires_at: expiresAt,
         });
+        const inviteUrl = buildFriendInviteUrl(token);
         return ephemeral(
-          `フレンド招待トークンを発行しました（7日間有効）。\n\n相手の Bot DM で次を実行してもらってください:\n/friend accept ${token}`
+          `フレンド招待リンクを発行しました（7日間有効）。\n\n${inviteUrl}\n\n相手にこのURLを送ってください。開いて「Discordで承認」すればフレンド追加されます。\n\n手動で受け付ける場合:\n/friend accept ${token}`
         );
       }
 
       if (sub === 'accept') {
         const token = data?.data?.options?.[0]?.options?.find((o: { name?: string; value?: string }) => o.name === 'token')?.value;
         if (!token || typeof token !== 'string') return ephemeral('token を指定してください。');
-        const svc = getServiceClient();
-        const { data: invite } = await svc
-          .from('discord_friend_invites')
-          .select('token,inviter_discord_user_id,expires_at,used_by_discord_user_id')
-          .eq('token', token)
-          .maybeSingle();
-        if (!invite) return ephemeral('招待トークンが見つかりません。');
-        if (invite.used_by_discord_user_id) return ephemeral('この招待トークンはすでに使用済みです。');
-        if (new Date(invite.expires_at as string).getTime() < Date.now()) return ephemeral('この招待トークンは有効期限切れです。');
-        const inviterDiscordUserId = invite.inviter_discord_user_id as string;
-        if (inviterDiscordUserId === userDiscordId) return ephemeral('自分の招待URLは受け付けられません。');
-        await upsertFriendship(inviterDiscordUserId, userDiscordId, 'invite_link');
-        await svc
-          .from('discord_friend_invites')
-          .update({ used_by_discord_user_id: userDiscordId, used_at: nowIso() })
-          .eq('token', token);
+        const result = await acceptFriendInvite(token, userDiscordId);
+        if (!result.ok) {
+          const messages: Record<string, string> = {
+            not_found: '招待トークンが見つかりません。',
+            used: 'この招待トークンはすでに使用済みです。',
+            expired: 'この招待トークンは有効期限切れです。',
+            self: '自分の招待URLは受け付けられません。',
+          };
+          return ephemeral(messages[result.reason] ?? 'フレンド追加に失敗しました。');
+        }
         return ephemeral('フレンド登録が完了しました。/play でフレンド候補を探せます。');
       }
 

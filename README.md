@@ -26,10 +26,17 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 
 ### 環境変数（主要）
 
-- `APP_BASE_URL` … 本番 URL（Interactions 内部呼び出し用）
-- `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`
+- `APP_BASE_URL` … 本番 URL（Interactions・招待リンク用）
+- `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_GUILD_ID`
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
 - `INTERNAL_SHARED_SECRET`, `POLL_WINDOW_MINUTES`, `UNITEAPI_BASE`
+
+### フレンド招待リンク（最小 Web）
+
+1. DM で `/friend invite` → `https://<ドメイン>/friend/<token>` を共有
+2. 相手が URL を開き「Discord で承認」→ OAuth 後に自動で `discord_friendships` に追加
+3. Discord Developer Portal → OAuth2 → Redirects に追加:
+   - `https://<ドメイン>/api/friend-invites/callback`
 
 ### Discord コマンド（DM 中心）
 
@@ -38,8 +45,8 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 | `/setup` | サーバー内案内（管理者・サーバーのみ） |
 | `/register` | ゲーム内 ID 登録 |
 | `/friend find` | 同じサーバー内からフレンド追加 |
-| `/friend invite` | 招待トークン発行（相手は `/friend accept`） |
-| `/friend accept` | 招待トークンでフレンド追加 |
+| `/friend invite` | 招待リンク発行（7日有効） |
+| `/friend accept` | 招待トークンでフレンド追加（手動） |
 | `/play` | フレンドの直近プレイ候補を検索 |
 | `/notify on\|off` | 通知 ON/OFF |
 
