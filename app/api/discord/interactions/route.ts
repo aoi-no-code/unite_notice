@@ -15,6 +15,7 @@ import {
 } from '@/lib/discordFriends';
 import {
   countDiscordFriends,
+  createBillingPortalSession,
   createPlusCheckoutSession,
   ensureBilling,
   formatPlanStatus,
@@ -440,11 +441,11 @@ export async function POST(req: NextRequest) {
             try {
               const url = await createPlusCheckoutSession(userDiscordId);
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: `**Plus プラン（${PLANS.plus.maxFriends}人まで）— ${PLANS.plus.priceYen}円**\n\n下のボタンから決済してください。完了後は \`/plan info\` で反映を確認できます。`,
+                content: `**Plus プラン（${PLANS.plus.maxFriends}人まで）— 月額${PLANS.plus.priceYen}円**\n\n下のボタンから申し込みしてください。完了後は \`/plan info\` で反映を確認できます。`,
                 components: [
                   {
                     type: 1,
-                    components: [{ type: 2, style: 5, label: `${PLANS.plus.priceYen}円でアップグレード`, url }],
+                    components: [{ type: 2, style: 5, label: `月額${PLANS.plus.priceYen}円で申し込む`, url }],
                   },
                 ],
                 flags: 64,
@@ -469,7 +470,53 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      return ephemeral('`/plan info` または `/plan upgrade` を利用してください。');
+      if (sub === 'portal') {
+        const billing = await ensureBilling(userDiscordId);
+        if (billing.planId !== 'plus') {
+          return ephemeral('Plus プラン契約中のみ利用できます。先に `/plan upgrade` で申し込んでください。');
+        }
+
+        const applicationId: string | undefined = data?.application_id;
+        const interactionToken: string | undefined = data?.token;
+        if (!applicationId || !interactionToken) {
+          return ephemeral('ポータルの情報を取得できませんでした。再実行してください。');
+        }
+
+        waitUntil(
+          (async () => {
+            try {
+              const url = await createBillingPortalSession(userDiscordId);
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: '解約・支払い方法の変更・請求履歴は下のボタンから Stripe のページで行えます。',
+                components: [
+                  {
+                    type: 1,
+                    components: [{ type: 2, style: 5, label: '契約を管理する', url }],
+                  },
+                ],
+                flags: 64,
+              });
+            } catch (err) {
+              console.log('[discord][interactions] plan portal failed', err);
+              const message =
+                err instanceof Error && err.message === 'no_customer'
+                  ? '契約情報が見つかりません。`/plan upgrade` から再度お申し込みください。'
+                  : '管理ページを開けませんでした。しばらく待ってから再実行してください。';
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: message,
+                flags: 64,
+              }).catch(() => {});
+            }
+          })()
+        );
+
+        return jsonResponse({
+          type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+          data: { flags: 64 },
+        });
+      }
+
+      return ephemeral('`/plan info` / `/plan upgrade` / `/plan portal` を利用してください。');
     }
 
     if (name === 'friend') {
@@ -662,7 +709,7 @@ export async function POST(req: NextRequest) {
         not_owner: 'この申請を承認する権限がありません。',
         not_pending: 'この申請はすでに処理済みです。',
         already_friends: 'すでにフレンドです。',
-        friend_limit_reached: `フレンド枠の上限に達しています（無料は${PLANS.free.maxFriends}人まで）。\`/plan upgrade\` で5人枠（${PLANS.plus.priceYen}円）にできます。`,
+        friend_limit_reached: `フレンド枠の上限に達しています（無料は${PLANS.free.maxFriends}人まで）。\`/plan upgrade\` で月額${PLANS.plus.priceYen}円の5人枠にできます。`,
       };
 
       waitUntil(

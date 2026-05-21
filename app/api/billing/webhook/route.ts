@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import Stripe from 'stripe';
-import { handleStripeCheckoutCompleted } from '@/lib/billing';
+import { handleStripeCheckoutCompleted, handleStripeSubscriptionEvent } from '@/lib/billing';
 
 export const runtime = 'nodejs';
 
@@ -27,9 +27,20 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object as Stripe.Checkout.Session;
-      await handleStripeCheckoutCompleted(session);
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object as Stripe.Checkout.Session;
+        await handleStripeCheckoutCompleted(session);
+        break;
+      }
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object as Stripe.Subscription;
+        await handleStripeSubscriptionEvent(subscription);
+        break;
+      }
+      default:
+        break;
     }
     return new Response(JSON.stringify({ received: true }), {
       status: 200,
@@ -37,7 +48,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Webhook handler failed';
-    console.error('[billing/webhook]', message);
+    console.error('[billing/webhook]', event.type, message);
     return new Response(message, { status: 500 });
   }
 }

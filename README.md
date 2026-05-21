@@ -34,7 +34,8 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 | `/friend manage` | フレンド整理（ボタンで削除） |
 | `/play` | フレンドの最新対戦（時間・パーティ）を表示し、誘い DM を送る |
 | `/plan info` | プラン・フレンド枠の確認 |
-| `/plan upgrade` | Plus（5人枠・300円）へアップグレード |
+| `/plan upgrade` | Plus（5人枠・月額300円）を申し込む |
+| `/plan portal` | 解約・支払い方法変更（Stripe） |
 | `/notify on\|off` | 通知 ON/OFF |
 | `/setup` | サーバー内案内（管理者） |
 
@@ -49,11 +50,12 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 | プラン | フレンド上限 | 料金 |
 |--------|-------------|------|
 | 無料 | 3人 | 0円 |
-| Plus | 5人 | 300円（買い切り） |
+| Plus | 5人 | 月額300円 |
 
-- DM で `/plan info` / `/plan upgrade`
-- Stripe Checkout → Webhook `POST /api/billing/webhook` で枠を反映
-- 環境変数: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PLUS`（Stripe で 300円の Price を作成し ID を設定）
+- DM で `/plan info` / `/plan upgrade` / `/plan portal`（解約）
+- Stripe **月額サブスク** → Webhook `POST /api/billing/webhook` で枠を反映・解約時に無料へ戻す
+- 環境変数: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PLUS`（Stripe で **月額300円の recurring Price** を作成）
+- Webhook イベント: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`
 
 ### Supabase マイグレーション（本番）
 
@@ -62,3 +64,4 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 1. `20260521_add_unite_api_uid.sql`
 2. `20260522_discord_friend_requests.sql`
 3. `20260523_discord_user_billing.sql`
+4. `20260524_discord_billing_subscription.sql`

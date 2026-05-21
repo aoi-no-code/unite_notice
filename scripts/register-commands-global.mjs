@@ -51,7 +51,8 @@ const commands = [
     type: 1,
     options: [
       { type: 1, name: 'info', description: '現在のプランとフレンド枠を表示' },
-      { type: 1, name: 'upgrade', description: '5人枠にアップグレード（300円）' },
+      { type: 1, name: 'upgrade', description: 'Plusを申し込む（月額300円）' },
+      { type: 1, name: 'portal', description: '契約の解約・支払い変更（Stripe）' },
     ],
     dm_permission: true,
     contexts: [1, 2],
