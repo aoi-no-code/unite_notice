@@ -72,48 +72,74 @@ const browserLikeHeaders = {
   'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
 } as const;
 
+const UNITE_NOT_FOUND_TITLE_MARKERS = ['プレイヤーが見つかりません', 'Player Not Found'] as const;
+
+/** UniteAPI のプレイヤーページ HTML から表示名を抽出（旧 | UniteApi / 新 - UniteAPI 両対応） */
+function parsePlayerNameFromPageHtml(html: string, identifier: string): string | null {
+  const plainTitle = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';
+  if (UNITE_NOT_FOUND_TITLE_MARKERS.some((m) => plainTitle.includes(m))) {
+    return null;
+  }
+
+  const brandedTitle = html.match(
+    /<title>([^<]+?)\s*(?:\|\s*UniteApi|-\s*UniteAPI)\s*<\/title>/i
+  );
+  if (!brandedTitle?.[1]) return null;
+
+  const name = decodeHtml(brandedTitle[1]).trim();
+  if (!name || name.toLowerCase() === identifier.toLowerCase()) return null;
+  return name;
+}
+
+/** プロフィールページが「未掲載 / 非公開」か（短縮IDが UniteAPI に無い場合など） */
+export async function isUnitePlayerNotIndexed(identifier: string, locale = 'jp'): Promise<boolean> {
+  const base = normalizeBaseUrl(process.env.UNITEAPI_BASE ?? 'https://uniteapi.dev');
+  const sourceUrl = `${base}/${locale}/p/${encodeURIComponent(identifier)}`;
+  const res = await fetch(sourceUrl, { cache: 'no-store', headers: browserLikeHeaders });
+  if (!res.ok) return false;
+  const html = await res.text();
+  const plainTitle = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';
+  return UNITE_NOT_FOUND_TITLE_MARKERS.some((m) => plainTitle.includes(m));
+}
+
 async function resolveBuildId(base: string, locale: string): Promise<string | null> {
   const res = await fetch(`${base}/${locale}`, { cache: 'no-store', headers: browserLikeHeaders });
   if (!res.ok) return null;
   const html = await res.text();
-  const match = html.match(/"buildId":"([^"]+)"/);
-  return match?.[1] ?? null;
+  const classic = html.match(/"buildId":"([^"]+)"/)?.[1];
+  if (classic) return classic;
+  // Next.js 15+ (Turbopack): RSC payload 内の b フィールド
+  const nextB =
+    html.match(/\\"b\\":\\"([A-Za-z0-9_-]{8,})\\"/)?.[1] ?? html.match(/"b":"([A-Za-z0-9_-]{8,})"/)?.[1];
+  return nextB ?? null;
 }
 
-async function fetchPlayerNameFromPage(base: string, identifier: string, locale: string): Promise<{ playerName: string | null; sourceUrl: string }> {
+async function fetchPlayerNameFromPage(
+  base: string,
+  identifier: string,
+  locale: string
+): Promise<{ playerName: string | null; sourceUrl: string; notIndexed: boolean }> {
   const paths = [`/${locale}/p/${encodeURIComponent(identifier)}`, `/p/${encodeURIComponent(identifier)}`];
   for (const path of paths) {
     const sourceUrl = `${base}${path}`;
     const res = await fetch(sourceUrl, { cache: 'no-store', headers: browserLikeHeaders });
     if (!res.ok) continue;
     const html = await res.text();
-
-    const titleMatch = html.match(/<title>([^<]+)\s\|\sUniteApi<\/title>/i);
-    if (titleMatch?.[1]) {
-      const name = decodeHtml(titleMatch[1]).trim();
-      if (name && name.toLowerCase() !== identifier.toLowerCase()) {
-        return { playerName: name, sourceUrl };
-      }
+    const plainTitle = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';
+    const notIndexed = UNITE_NOT_FOUND_TITLE_MARKERS.some((m) => plainTitle.includes(m));
+    if (notIndexed) {
+      return { playerName: null, sourceUrl, notIndexed: true };
+    }
+    const playerName = parsePlayerNameFromPageHtml(html, identifier);
+    if (playerName) {
+      return { playerName, sourceUrl, notIndexed: false };
     }
   }
-  return { playerName: null, sourceUrl: `${base}/p/${encodeURIComponent(identifier)}` };
-}
-
-/** dev.uniteapi.dev の検索ページ（RSC）に埋め込まれた players JSON から表示名を取る */
-async function fetchPlayerNameFromDevSearch(
-  identifier: string,
-  locale: string
-): Promise<{ playerName: string | null; sourceUrl: string }> {
-  const searchBase = normalizeBaseUrl(process.env.UNITEAPI_SEARCH_BASE ?? 'https://dev.uniteapi.dev');
-  const sourceUrl = `${searchBase}/${locale}/search?q=${encodeURIComponent(identifier)}`;
-  const res = await fetch(sourceUrl, { cache: 'no-store', headers: browserLikeHeaders });
-  if (!res.ok) return { playerName: null, sourceUrl };
-  const html = await res.text();
-  const m = html.match(/\\"players\\":\[{\\"uid\\":\\"[^"]+\\",\\"name\\":\\"([^"]+)\\"/);
-  if (!m?.[1]) return { playerName: null, sourceUrl };
-  const name = m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
-  if (!name) return { playerName: null, sourceUrl };
-  return { playerName: name, sourceUrl };
+  return {
+    playerName: null,
+    sourceUrl: `${base}/p/${encodeURIComponent(identifier)}`,
+    notIndexed: false,
+  };
 }
 
 async function fetchNicknameFallbacks(
@@ -125,11 +151,6 @@ async function fetchNicknameFallbacks(
   if (page.playerName) {
     const profile: UnitePlayerProfile = { playerName: page.playerName };
     return { profile, rawPlayer: { profile }, sourceUrl: page.sourceUrl };
-  }
-  const dev = await fetchPlayerNameFromDevSearch(identifier, locale);
-  if (dev.playerName) {
-    const profile: UnitePlayerProfile = { playerName: dev.playerName };
-    return { profile, rawPlayer: { profile }, sourceUrl: dev.sourceUrl };
   }
   return null;
 }
@@ -143,7 +164,8 @@ export async function fetchUniteProfile(identifier: string, locale = 'jp'): Prom
 
   const dataUrl = `${base}/_next/data/${buildId}/${locale}/p/${encodeURIComponent(identifier)}.json`;
   const res = await fetch(dataUrl, { cache: 'no-store', headers: browserLikeHeaders });
-  if (!res.ok) {
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!res.ok || !contentType.includes('application/json')) {
     return (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
   }
 

@@ -2,7 +2,7 @@ import { waitUntil } from '@vercel/functions';
 import { NextRequest } from 'next/server';
 import { verifyDiscordRequest } from '../../../../lib/verify';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
-import { fetchLatestBattleAt, fetchUniteProfile } from '@/lib/unite';
+import { fetchLatestBattleAt, fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
 import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
 import { randomBytes } from 'crypto';
 
@@ -89,7 +89,9 @@ async function upsertRegistration(
       profileFetchedAt = nowIso();
     } else {
       fetchStatus = 'failed';
-      lastFetchError = 'unite_player_name_not_found';
+      lastFetchError = (await isUnitePlayerNotIndexed(unitePlayerId))
+        ? 'unite_player_not_indexed'
+        : 'unite_player_name_not_found';
     }
   } catch {
     // 名前同期に失敗しても登録自体は継続
@@ -116,8 +118,11 @@ function buildRegisterProfileLine(result: { trainerName: string | null; fetchSta
   if (result.fetchStatus === 'ok') {
     return `ゲーム内名: ${result.trainerName ?? '取得不可（IDのみ保存）'}`;
   }
+  if (result.lastFetchError === 'unite_player_not_indexed') {
+    return 'ゲーム内名: このIDは UniteAPI に未登録です。uniteapi.dev でプロフィールを開けるか、ゲーム内IDを再確認してください（非公開設定だと取得できません）';
+  }
   if (result.lastFetchError === 'unite_player_name_not_found') {
-    return 'ゲーム内名: UniteAPI上で対象プレイヤーを見つけられませんでした（ID形式や公開状況を確認してください）';
+    return 'ゲーム内名: UniteAPI上で表示名を取得できませんでした（ID形式を確認してください）';
   }
   if (result.lastFetchError === 'fetch_unite_profile_failed') {
     return 'ゲーム内名: 取得失敗（UniteAPIアクセス失敗）';
