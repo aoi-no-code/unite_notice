@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { canAddFriend } from './billing';
 import { getServiceClient } from './db';
 
 export type FriendProfile = {
@@ -208,7 +209,7 @@ export async function approveFriendRequest(
   ownerDiscordUserId: string
 ): Promise<
   | { ok: true; friends: FriendProfile[]; requesterDiscordUserId: string }
-  | { ok: false; reason: 'not_found' | 'not_owner' | 'not_pending' | 'already_friends' }
+  | { ok: false; reason: 'not_found' | 'not_owner' | 'not_pending' | 'already_friends' | 'friend_limit_reached' }
 > {
   const svc = getServiceClient();
   const { data: req } = await svc
@@ -221,6 +222,12 @@ export async function approveFriendRequest(
   if (req.status !== 'pending') return { ok: false, reason: 'not_pending' };
 
   const requesterDiscordUserId = req.requester_discord_user_id as string;
+
+  const slot = await canAddFriend(ownerDiscordUserId);
+  if (!slot.ok) {
+    return { ok: false, reason: 'friend_limit_reached' };
+  }
+
   if (await areDiscordFriends(ownerDiscordUserId, requesterDiscordUserId)) {
     await svc
       .from('discord_friend_requests')

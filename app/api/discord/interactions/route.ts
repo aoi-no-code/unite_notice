@@ -13,6 +13,13 @@ import {
   removeDiscordFriend,
   submitFriendRequest,
 } from '@/lib/discordFriends';
+import {
+  countDiscordFriends,
+  createPlusCheckoutSession,
+  ensureBilling,
+  formatPlanStatus,
+  PLANS,
+} from '@/lib/billing';
 import { buildFriendManagePayload } from '@/lib/discordFriendManageUi';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
@@ -405,6 +412,66 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    if (name === 'plan') {
+      if (!isDm) return ephemeral('/plan はDM専用です。');
+      const sub = data?.data?.options?.[0]?.name as string | undefined;
+
+      if (sub === 'info') {
+        const billing = await ensureBilling(userDiscordId);
+        const count = await countDiscordFriends(userDiscordId);
+        return ephemeral(formatPlanStatus(billing, count));
+      }
+
+      if (sub === 'upgrade') {
+        const billing = await ensureBilling(userDiscordId);
+        if (billing.planId === 'plus') {
+          const count = await countDiscordFriends(userDiscordId);
+          return ephemeral(`すでに Plus プランです（${count}/${billing.maxFriendSlots}人）。`);
+        }
+
+        const applicationId: string | undefined = data?.application_id;
+        const interactionToken: string | undefined = data?.token;
+        if (!applicationId || !interactionToken) {
+          return ephemeral('決済の情報を取得できませんでした。再実行してください。');
+        }
+
+        waitUntil(
+          (async () => {
+            try {
+              const url = await createPlusCheckoutSession(userDiscordId);
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: `**Plus プラン（${PLANS.plus.maxFriends}人まで）— ${PLANS.plus.priceYen}円**\n\n下のボタンから決済してください。完了後は \`/plan info\` で反映を確認できます。`,
+                components: [
+                  {
+                    type: 1,
+                    components: [{ type: 2, style: 5, label: `${PLANS.plus.priceYen}円でアップグレード`, url }],
+                  },
+                ],
+                flags: 64,
+              });
+            } catch (err) {
+              console.log('[discord][interactions] plan upgrade failed', err);
+              const message =
+                err instanceof Error && err.message === 'already_plus'
+                  ? 'すでに Plus プランです。'
+                  : '決済ページの作成に失敗しました。しばらく待ってから再実行してください。';
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: message,
+                flags: 64,
+              }).catch(() => {});
+            }
+          })()
+        );
+
+        return jsonResponse({
+          type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+          data: { flags: 64 },
+        });
+      }
+
+      return ephemeral('`/plan info` または `/plan upgrade` を利用してください。');
+    }
+
     if (name === 'friend') {
       if (!isDm) return ephemeral('/friend はDM専用です。');
       const sub = data?.data?.options?.[0]?.name as string | undefined;
@@ -595,6 +662,7 @@ export async function POST(req: NextRequest) {
         not_owner: 'この申請を承認する権限がありません。',
         not_pending: 'この申請はすでに処理済みです。',
         already_friends: 'すでにフレンドです。',
+        friend_limit_reached: `フレンド枠の上限に達しています（無料は${PLANS.free.maxFriends}人まで）。\`/plan upgrade\` で5人枠（${PLANS.plus.priceYen}円）にできます。`,
       };
 
       waitUntil(

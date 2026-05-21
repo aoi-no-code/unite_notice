@@ -33,6 +33,8 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 | `/friend list` | フレンド一覧 |
 | `/friend manage` | フレンド整理（ボタンで削除） |
 | `/play` | フレンドの最新対戦（時間・パーティ）を表示し、誘い DM を送る |
+| `/plan info` | プラン・フレンド枠の確認 |
+| `/plan upgrade` | Plus（5人枠・300円）へアップグレード |
 | `/notify on\|off` | 通知 ON/OFF |
 | `/setup` | サーバー内案内（管理者） |
 
@@ -42,9 +44,21 @@ Discord のスラッシュコマンド / ボタンで、登録したフレンド
 - `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`
 - `INTERNAL_SHARED_SECRET`, `POLL_WINDOW_MINUTES`, `UNITEAPI_BASE`
 
+### 課金プラン
+
+| プラン | フレンド上限 | 料金 |
+|--------|-------------|------|
+| 無料 | 3人 | 0円 |
+| Plus | 5人 | 300円（買い切り） |
+
+- DM で `/plan info` / `/plan upgrade`
+- Stripe Checkout → Webhook `POST /api/billing/webhook` で枠を反映
+- 環境変数: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_PLUS`（Stripe で 300円の Price を作成し ID を設定）
+
 ### Supabase マイグレーション（本番）
 
 順に実行:
 
 1. `20260521_add_unite_api_uid.sql`
 2. `20260522_discord_friend_requests.sql`
+3. `20260523_discord_user_billing.sql`

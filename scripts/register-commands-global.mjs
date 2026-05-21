@@ -46,6 +46,17 @@ const commands = [
     contexts: [1, 2],
   },
   {
+    name: 'plan',
+    description: 'プラン確認・フレンド枠のアップグレード',
+    type: 1,
+    options: [
+      { type: 1, name: 'info', description: '現在のプランとフレンド枠を表示' },
+      { type: 1, name: 'upgrade', description: '5人枠にアップグレード（300円）' },
+    ],
+    dm_permission: true,
+    contexts: [1, 2],
+  },
+  {
     name: 'friend',
     description: 'フレンド管理',
     type: 1,
