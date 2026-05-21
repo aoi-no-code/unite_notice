@@ -99,7 +99,10 @@ export async function isUnitePlayerNotIndexed(identifier: string, locale = 'jp')
   if (!res.ok) return false;
   const html = await res.text();
   const plainTitle = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() ?? '';
-  return UNITE_NOT_FOUND_TITLE_MARKERS.some((m) => plainTitle.includes(m));
+  const directNotFound = UNITE_NOT_FOUND_TITLE_MARKERS.some((m) => plainTitle.includes(m));
+  if (!directNotFound) return false;
+  const hit = await resolveUniteApiUidFromSearch(identifier, locale);
+  return hit === null;
 }
 
 async function resolveBuildId(base: string, locale: string): Promise<string | null> {
@@ -112,6 +115,39 @@ async function resolveBuildId(base: string, locale: string): Promise<string | nu
   const nextB =
     html.match(/\\"b\\":\\"([A-Za-z0-9_-]{8,})\\"/)?.[1] ?? html.match(/"b":"([A-Za-z0-9_-]{8,})"/)?.[1];
   return nextB ?? null;
+}
+
+type UniteSearchHit = { uid: string; name: string };
+
+/** 検索結果 RSC に埋め込まれた players 配列をパース */
+function parsePlayersFromSearchHtml(html: string): UniteSearchHit[] {
+  const players: UniteSearchHit[] = [];
+  const re = /\\"uid\\":\\"(\d+)\\",\\"name\\":\\"([^\\"]*)\\"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const name = m[2].replace(/\\u0023/g, '#').replace(/\\\\/g, '\\').trim();
+    if (name) players.push({ uid: m[1], name });
+  }
+  return players;
+}
+
+/**
+ * ゲーム内短縮ID (例: RM5KXPT) → UniteAPI プロフィール用の数値 uid (例: 14724770799654291999)
+ * 直接 /p/{短縮ID} は 404 だが、/search?q={短縮ID} ではヒットするケースがある。
+ */
+export async function resolveUniteApiUidFromSearch(
+  identifier: string,
+  locale = 'jp'
+): Promise<UniteSearchHit | null> {
+  const base = normalizeBaseUrl(process.env.UNITEAPI_BASE ?? 'https://uniteapi.dev');
+  const sourceUrl = `${base}/${locale}/search?q=${encodeURIComponent(identifier)}`;
+  const res = await fetch(sourceUrl, { cache: 'no-store', headers: browserLikeHeaders });
+  if (!res.ok) return null;
+  const html = await res.text();
+  const players = parsePlayersFromSearchHtml(html);
+  // 短縮ID検索で 1 件だけ返るときだけ採用（複数ヒット時に誤った名前を拾わない）
+  if (players.length !== 1) return null;
+  return players[0];
 }
 
 async function fetchPlayerNameFromPage(
@@ -149,45 +185,94 @@ async function fetchNicknameFallbacks(
 ): Promise<UniteProfileData | null> {
   const page = await fetchPlayerNameFromPage(base, identifier, locale);
   if (page.playerName) {
-    const profile: UnitePlayerProfile = { playerName: page.playerName };
+    const profile: UnitePlayerProfile = { playerName: page.playerName, userShort: identifier };
     return { profile, rawPlayer: { profile }, sourceUrl: page.sourceUrl };
   }
-  return null;
+
+  if (!page.notIndexed) return null;
+
+  const hit = await resolveUniteApiUidFromSearch(identifier, locale);
+  if (!hit) return null;
+
+  const uidPage = await fetchPlayerNameFromPage(base, hit.uid, locale);
+  const playerName = uidPage.playerName ?? hit.name;
+  const profile: UnitePlayerProfile = {
+    uid: hit.uid,
+    userShort: identifier,
+    playerName,
+  };
+  return {
+    profile,
+    rawPlayer: { profile },
+    sourceUrl: uidPage.sourceUrl,
+  };
+}
+
+/** 短縮ID → UniteAPI が参照するプロフィールキー（多くは数値 uid） */
+export async function resolveUniteProfileLookupKey(
+  shortId: string,
+  storedApiUid?: string | null,
+  locale = 'jp'
+): Promise<string> {
+  if (storedApiUid) return storedApiUid;
+  const base = normalizeBaseUrl(process.env.UNITEAPI_BASE ?? 'https://uniteapi.dev');
+  const page = await fetchPlayerNameFromPage(base, shortId, locale);
+  if (!page.notIndexed) return shortId;
+  const hit = await resolveUniteApiUidFromSearch(shortId, locale);
+  return hit?.uid ?? shortId;
 }
 
 export async function fetchUniteProfile(identifier: string, locale = 'jp'): Promise<UniteProfileData | null> {
   const base = normalizeBaseUrl(process.env.UNITEAPI_BASE ?? 'https://uniteapi.dev');
-  const buildId = await resolveBuildId(base, locale);
-  if (!buildId) {
-    return (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+  const directPage = await fetchPlayerNameFromPage(base, identifier, locale);
+  let lookupId = identifier;
+  if (directPage.notIndexed) {
+    const hit = await resolveUniteApiUidFromSearch(identifier, locale);
+    if (hit) lookupId = hit.uid;
   }
 
-  const dataUrl = `${base}/_next/data/${buildId}/${locale}/p/${encodeURIComponent(identifier)}.json`;
+  const buildId = await resolveBuildId(base, locale);
+  if (!buildId) {
+    const fb = (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    if (fb?.profile) fb.profile.userShort = identifier;
+    return fb;
+  }
+
+  const dataUrl = `${base}/_next/data/${buildId}/${locale}/p/${encodeURIComponent(lookupId)}.json`;
   const res = await fetch(dataUrl, { cache: 'no-store', headers: browserLikeHeaders });
   const contentType = res.headers.get('content-type') ?? '';
   if (!res.ok || !contentType.includes('application/json')) {
-    return (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    const fb = (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    if (fb?.profile) fb.profile.userShort = identifier;
+    return fb;
   }
 
   const data = (await res.json()) as NextDataPayload;
   const encrypted = data.pageProps?.a;
   if (!encrypted) {
-    return (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    const fb = (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    if (fb?.profile) fb.profile.userShort = identifier;
+    return fb;
   }
 
   const decrypted = decryptPayload(encrypted);
   const player = (decrypted.player ?? null) as UnitePlayerPayload | null;
   const profile = (player?.profile ?? null) as UnitePlayerProfile | null;
   if (!player || !profile) {
-    return (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    const fb = (await fetchNicknameFallbacks(base, identifier, locale)) ?? null;
+    if (fb?.profile) fb.profile.userShort = identifier;
+    return fb;
   }
+
+  profile.userShort = identifier;
+  if (lookupId !== identifier) profile.uid = lookupId;
 
   const trimmedName = profile.playerName?.trim();
   if (!trimmedName) {
     const fb = await fetchNicknameFallbacks(base, identifier, locale);
     if (fb?.profile?.playerName?.trim()) {
       return {
-        profile: { ...profile, playerName: fb.profile.playerName },
+        profile: { ...profile, playerName: fb.profile.playerName, uid: fb.profile.uid ?? lookupId, userShort: identifier },
         rawPlayer: player,
         sourceUrl: dataUrl,
       };

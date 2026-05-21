@@ -82,8 +82,10 @@ async function upsertRegistration(
   let fetchStatus: 'ok' | 'failed' = 'ok';
   let lastFetchError: string | null = null;
   let profileFetchedAt: string | null = null;
+  let uniteApiUid: string | null = null;
   try {
     const profile = await fetchUniteProfile(unitePlayerId);
+    uniteApiUid = profile?.profile?.uid?.trim() || null;
     trainerName = profile?.profile?.playerName?.trim() || null;
     if (trainerName) {
       profileFetchedAt = nowIso();
@@ -104,6 +106,7 @@ async function upsertRegistration(
       discord_user_id: discordUserId,
       discord_user_ref_id: discordUser.id,
       unite_player_id: unitePlayerId,
+      unite_api_uid: uniteApiUid,
       trainer_name: trainerName,
       fetch_status: fetchStatus,
       profile_fetched_at: profileFetchedAt,

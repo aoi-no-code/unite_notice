@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   discord_id text UNIQUE,
   trainer_name text,
   unite_trainer_id text CHECK (unite_trainer_id IS NULL OR unite_trainer_id ~ '^[A-Za-z0-9]+$'),
+  unite_api_uid text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -126,6 +127,7 @@ CREATE TABLE IF NOT EXISTS public.discord_user_game_profiles (
   discord_user_id text NOT NULL,
   discord_user_ref_id uuid REFERENCES public.discord_users (id) ON DELETE SET NULL,
   unite_player_id text NOT NULL CHECK (unite_player_id ~ '^[A-Za-z0-9]+$'),
+  unite_api_uid text,
   trainer_name text,
   fetch_status text NOT NULL DEFAULT 'pending' CHECK (fetch_status IN ('pending', 'ok', 'failed')),
   profile_fetched_at timestamptz,

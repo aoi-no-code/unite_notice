@@ -15,6 +15,7 @@ export async function syncTrainerNameIfChanged(options: SyncOptions): Promise<st
   const { supabase, userId, uniteTrainerId, currentTrainerName, source } = options;
   const uniteProfile = await fetchUniteProfile(uniteTrainerId);
   const latestTrainerName = uniteProfile?.profile?.playerName?.trim() || null;
+  const uniteApiUid = uniteProfile?.profile?.uid?.trim() || null;
 
   if (!latestTrainerName || latestTrainerName === currentTrainerName) {
     return currentTrainerName;
@@ -22,7 +23,10 @@ export async function syncTrainerNameIfChanged(options: SyncOptions): Promise<st
 
   const { error: updateError } = await supabase
     .from('users')
-    .update({ trainer_name: latestTrainerName })
+    .update({
+      trainer_name: latestTrainerName,
+      ...(uniteApiUid ? { unite_api_uid: uniteApiUid } : {}),
+    })
     .eq('id', userId);
   if (updateError) throw updateError;
 
