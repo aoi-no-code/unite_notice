@@ -729,16 +729,42 @@ export async function POST(req: NextRequest) {
     if (customId.startsWith('play:invite:')) {
       const targetDiscordUserId = customId.replace('play:invite:', '');
       if (!targetDiscordUserId) return ephemeral('招待先が不正です。');
-      if (!(await areFriends(userDiscordId, targetDiscordUserId))) {
-        return ephemeral('フレンド以外には招待できません。');
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('招待の情報を取得できませんでした。再実行してください。');
       }
-      const senderName = await getPlaySenderDisplayName(userDiscordId);
-      try {
-        await sendDiscordDM(targetDiscordUserId, buildPlayInvitePayload(senderName, userDiscordId));
-        return ephemeral(`${senderName} さんとして招待を送りました。`);
-      } catch {
-        return ephemeral('招待を送れませんでした。相手のDM設定を確認してください。');
-      }
+
+      waitUntil(
+        (async () => {
+          try {
+            if (!(await areFriends(userDiscordId, targetDiscordUserId))) {
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: 'フレンド以外には招待できません。',
+                flags: 64,
+              });
+              return;
+            }
+            const senderName = await getPlaySenderDisplayName(userDiscordId);
+            await sendDiscordDM(targetDiscordUserId, buildPlayInvitePayload(senderName, userDiscordId));
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: `${senderName} さんとして招待を送りました。`,
+              flags: 64,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] play invite failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: '招待を送れませんでした。相手のDM設定を確認してください。',
+              flags: 64,
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
 
     if (customId.startsWith('play:reply:')) {
@@ -747,15 +773,21 @@ export async function POST(req: NextRequest) {
       const senderDiscordUserId = parts[3];
       const message = PLAY_REPLY_MESSAGES[replyCode];
       if (!message || !senderDiscordUserId) return ephemeral('返信の処理に失敗しました。');
-      const responderName = await getPlaySenderDisplayName(userDiscordId);
-      try {
-        await sendDiscordDM(senderDiscordUserId, {
-          content: `🎮 **${responderName}** さん: ${message}`,
-        });
-        return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
-      } catch {
-        return ephemeral('返信を送れませんでした。相手のDM設定を確認してください。');
-      }
+
+      waitUntil(
+        (async () => {
+          try {
+            const responderName = await getPlaySenderDisplayName(userDiscordId);
+            await sendDiscordDM(senderDiscordUserId, {
+              content: `🎮 **${responderName}** さん: ${message}`,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] play reply failed', err);
+          }
+        })()
+      );
+
+      return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
     }
 
     if (customId === 'play:close') {
