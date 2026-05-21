@@ -14,11 +14,7 @@ import {
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchLatestBattleAt, fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
 import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
-import {
-  buildFriendCodeCopyEphemeral,
-  buildFriendCodeIssuePayload,
-  isFriendCode,
-} from '@/lib/discordFriendCodeUi';
+import { buildFriendCodeGuidePayload, FRIEND_CODE_ISSUE_BUTTON_ID } from '@/lib/discordFriendCodeUi';
 
 const InteractionType = {
   PING: 1,
@@ -507,8 +503,7 @@ export async function POST(req: NextRequest) {
       const sub = data?.data?.options?.[0]?.name as string | undefined;
 
       if (sub === 'code') {
-        const { code, expiresAt } = await createFriendCode(userDiscordId);
-        return ephemeralData(buildFriendCodeIssuePayload(code, expiresAt));
+        return ephemeralData(buildFriendCodeGuidePayload());
       }
 
       if (sub === 'request') {
@@ -611,10 +606,17 @@ export async function POST(req: NextRequest) {
       return ephemeral(`登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`);
     }
 
-    if (customId.startsWith('friend:copy:')) {
-      const code = customId.replace('friend:copy:', '').trim().toUpperCase();
-      if (!isFriendCode(code)) return ephemeral('無効なコードです。');
-      return ephemeralData(buildFriendCodeCopyEphemeral(code));
+    if (customId === FRIEND_CODE_ISSUE_BUTTON_ID) {
+      const { code, expiresAt } = await createFriendCode(userDiscordId);
+      const expires = new Date(expiresAt).toLocaleString('ja-JP');
+      try {
+        await sendDiscordDM(userDiscordId, { content: code });
+        return ephemeral(
+          `コードを送信しました（${expires} まで有効）。\n\n**上のメッセージ**（コードのみ）を長押ししてコピーし、相手に伝えてください。`
+        );
+      } catch {
+        return ephemeral('コードを送れませんでした。Discordのプライバシー設定でDMを許可してください。');
+      }
     }
 
     if (customId.startsWith('friend:req:approve:')) {
