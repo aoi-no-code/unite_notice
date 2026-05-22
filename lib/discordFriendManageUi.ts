@@ -1,3 +1,4 @@
+import { COPY } from './botCopy';
 import type { FriendProfile } from './discordFriends';
 import { formatRequesterDisplayName } from './discordFriends';
 
@@ -7,7 +8,7 @@ export function buildFriendManagePayload(friends: FriendProfile[], removedLine?:
   if (friends.length === 0) {
     const prefix = removedLine ? `${removedLine}\n\n` : '';
     return {
-      content: `${prefix}フレンドはいません。\`/friend code\` で追加できます。`,
+      content: `${prefix}${COPY.friend.manageEmpty}`,
       embeds: [] as unknown[],
       components: [] as unknown[],
     };
@@ -31,7 +32,7 @@ export function buildFriendManagePayload(friends: FriendProfile[], removedLine?:
         return {
           type: 2,
           style: 4,
-          label: `削除: ${label}`.slice(0, 80),
+          label: COPY.friend.removeBtn(label).slice(0, 80),
           custom_id: `friend:remove:${f.discordUserId}`,
         };
       }),
@@ -40,8 +41,8 @@ export function buildFriendManagePayload(friends: FriendProfile[], removedLine?:
 
   const prefix = removedLine ? `${removedLine}\n\n` : '';
   return {
-    content: `${prefix}**フレンド整理** — 削除する相手のボタンを押してください。`,
-    embeds: [{ title: `フレンド一覧（${friends.length}人）`, description, color: 0x5865f2 }],
+    content: `${prefix}${COPY.friend.manageHeader}`,
+    embeds: [{ title: COPY.friend.manageEmbedTitle(friends.length), description, color: 0x5865f2 }],
     components,
   };
 }

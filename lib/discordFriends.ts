@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { COPY } from './botCopy';
 import { canAddFriend } from './billing';
 import { getServiceClient } from './db';
 
@@ -183,11 +184,11 @@ export function formatRequesterDisplayName(
   if (name) return name;
   const id = unitePlayerId?.trim();
   if (id) return id;
-  return '申請者';
+  return COPY.friend.requesterFallback;
 }
 
 export function formatFriendListLines(friends: FriendProfile[]): string {
-  if (friends.length === 0) return 'フレンドはまだいません。';
+  if (friends.length === 0) return COPY.friend.listEmpty;
   return friends
     .map((f, i) => {
       const label = f.trainerName || f.unitePlayerId || f.discordUserId;

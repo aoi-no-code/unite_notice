@@ -13,14 +13,18 @@ import {
   removeDiscordFriend,
   submitFriendRequest,
 } from '@/lib/discordFriends';
+import { countDiscordFriends, ensureBilling, formatPlanStatus, PLANS } from '@/lib/billing';
 import {
-  countDiscordFriends,
-  createBillingPortalSession,
-  createPlusCheckoutSession,
-  ensureBilling,
-  formatPlanStatus,
-  PLANS,
-} from '@/lib/billing';
+  approvePaymentRequest,
+  buildPaymentReportModal,
+  buildPremiumIntroPayload,
+  createPaymentRequest,
+  ensurePremiumRow,
+  formatPremiumStatusForUser,
+  PREMIUM_MODAL_ID,
+  PREMIUM_REPORT_BUTTON_ID,
+  rejectPaymentRequest,
+} from '@/lib/premium';
 import { buildFriendManagePayload } from '@/lib/discordFriendManageUi';
 import { getOrCreateDiscordUser, getServiceClient } from '@/lib/db';
 import { fetchUniteProfile, isUnitePlayerNotIndexed } from '@/lib/unite';
@@ -31,13 +35,15 @@ import {
   getPlaySenderDisplayName,
   PLAY_REPLY_MESSAGES,
 } from '@/lib/play';
-import { sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
+import { editDeferredInteractionMessage, sendDiscordDM, sendInteractionFollowup } from '@/lib/discord';
+import { ACTIVE_FRIEND_SLOT_LIMIT, BILLING_FEATURE_ENABLED, COPY } from '@/lib/botCopy';
 import { buildFriendCodeGuidePayload, FRIEND_CODE_ISSUE_BUTTON_ID } from '@/lib/discordFriendCodeUi';
 
 const InteractionType = {
   PING: 1,
   APPLICATION_COMMAND: 2,
   MESSAGE_COMPONENT: 3,
+  MODAL_SUBMIT: 5,
 } as const;
 
 const InteractionResponseType = {
@@ -46,6 +52,7 @@ const InteractionResponseType = {
   DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
   DEFERRED_UPDATE_MESSAGE: 6,
   UPDATE_MESSAGE: 7,
+  MODAL: 9,
 } as const;
 
 function jsonResponse(payload: unknown) {
@@ -77,6 +84,31 @@ function hasAdminPermission(permissions: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+function canReviewPremiumPayment(data: { guild_id?: string; member?: { permissions?: string } }): boolean {
+  if (!data?.guild_id) return false;
+  return hasAdminPermission(data.member?.permissions);
+}
+
+function parseModalValues(data: {
+  components?: Array<{ components?: Array<{ custom_id: string; value: string }> }>;
+}): Array<{ custom_id: string; value: string }> {
+  const values: Array<{ custom_id: string; value: string }> = [];
+  for (const row of data.components ?? []) {
+    for (const field of row.components ?? []) {
+      if (field.custom_id) values.push({ custom_id: field.custom_id, value: field.value ?? '' });
+    }
+  }
+  return values;
+}
+
+function discordUsernameFromInteraction(data: {
+  member?: { user?: { username?: string; global_name?: string | null } };
+  user?: { username?: string; global_name?: string | null };
+}): string {
+  const user = data.member?.user ?? data.user;
+  return user?.global_name?.trim() || user?.username?.trim() || '不明';
 }
 
 function normalizeUniteId(value: unknown): string | null {
@@ -155,18 +187,18 @@ async function upsertRegistration(
 }
 function buildRegisterProfileLine(result: { trainerName: string | null; fetchStatus: 'ok' | 'failed'; lastFetchError: string | null }): string {
   if (result.fetchStatus === 'ok') {
-    return `ゲーム内名: ${result.trainerName ?? '取得不可（IDのみ保存）'}`;
+    return result.trainerName ? COPY.register.profileOk(result.trainerName) : COPY.register.profileOkFallback;
   }
   if (result.lastFetchError === 'unite_player_not_indexed') {
-    return 'ゲーム内名: このIDは UniteAPI に未登録です。uniteapi.dev でプロフィールを開けるか、ゲーム内IDを再確認してください（非公開設定だと取得できません）';
+    return COPY.register.profileNotIndexed;
   }
   if (result.lastFetchError === 'unite_player_name_not_found') {
-    return 'ゲーム内名: UniteAPI上で表示名を取得できませんでした（ID形式を確認してください）';
+    return COPY.register.profileNameNotFound;
   }
   if (result.lastFetchError === 'fetch_unite_profile_failed') {
-    return 'ゲーム内名: 取得失敗（UniteAPIアクセス失敗）';
+    return COPY.register.profileFetchFailed;
   }
-  return 'ゲーム内名: 取得失敗（IDのみ保存）';
+  return COPY.register.profileFailed;
 }
 
 async function areFriends(a: string, b: string): Promise<boolean> {
@@ -264,24 +296,23 @@ export async function POST(req: NextRequest) {
     const name: string = data?.data?.name;
     const userDiscordId: string | undefined = data?.member?.user?.id || data?.user?.id;
     const isDm = !data?.guild_id;
-    if (!userDiscordId) return ephemeral('Discordユーザー情報を取得できませんでした。');
+    if (!userDiscordId) return ephemeral(COPY.common.noUser);
 
     if (name === 'setup') {
-      if (isDm) return ephemeral('/setup はサーバー内で実行してください。');
+      if (isDm) return ephemeral(COPY.setup.guildOnly);
       const permissions: string | undefined = data?.member?.permissions;
       if (!hasAdminPermission(permissions)) {
-        return ephemeral('このコマンドは管理者のみ実行できます。');
+        return ephemeral(COPY.setup.adminOnly);
       }
       const embed = {
-        title: '🎮 UniteFriendsへようこそ！',
-        description:
-          'このBotは、ポケモンユナイトで\n「今誘えそうなフレンド」を見つけるためのBotです。\n\nサーバー内では登録通知を流さず、\n登録・検索・通知設定はすべてBotとの個別DMで行います。\n\n使い方：\n1. BotとのDMを開く\n2. /register でゲーム内IDを登録\n3. /friend code でフレンド追加用コードを発行\n4. 相手に /friend request コード で申請してもらう\n5. 届いた申請を承認（DMのボタンまたは /friend pending）\n6. /play で今誘えそうなフレンドを検索',
+        title: COPY.setup.embedTitle,
+        description: COPY.setup.embedDescription,
         color: 0x5865f2,
       };
       const components = [
         {
           type: 1,
-          components: [{ type: 2, style: 1, label: 'BotとDMを開く', custom_id: 'unite:setup_open_dm' }],
+          components: [{ type: 2, style: 1, label: COPY.setup.dmButtonLabel, custom_id: 'unite:setup_open_dm' }],
         },
       ];
       return jsonResponse({
@@ -301,26 +332,24 @@ export async function POST(req: NextRequest) {
           },
           body: JSON.stringify({ owner_discord_id: userDiscordId }),
         });
-        return ephemeral('チェックを実行しました。');
+        return ephemeral(COPY.notify.pingDone);
       }
-      return ephemeral('新フローでは /setup /register /play /notify を利用してください。');
+      return ephemeral(COPY.legacy.useNewFlow);
     }
 
     if (name === 'register') {
       if (!isDm) {
-        return ephemeral('`/register` はDM専用です。サーバー内では `/setup` で案内を表示してください。');
+        return ephemeral(COPY.register.dmOnly);
       }
       const rawUniteId = data?.data?.options?.find((o: { name?: string; value?: string }) => o.name === 'unite_player_id')?.value;
       const unitePlayerId = normalizeUniteId(rawUniteId);
       if (!unitePlayerId) {
-        return ephemeral(
-          '🎮 UniteFriendsへようこそ！\n\nまずはあなたのポケモンユナイトのゲーム内IDを登録してください。\n\n/register ゲーム内ID\n\n登録後は\n/play\nで、同じサーバーにいる登録済みユーザーの中から\n最近対戦している人を探せます。'
-        );
+        return ephemeral(COPY.register.prompt);
       }
       const applicationId: string | undefined = data?.application_id;
       const interactionToken: string | undefined = data?.token;
       if (!applicationId || !interactionToken) {
-        return ephemeral('登録レスポンスの情報を取得できませんでした。再実行してください。');
+        return ephemeral(COPY.register.responseMissing);
       }
 
       waitUntil(
@@ -330,7 +359,7 @@ export async function POST(req: NextRequest) {
             const guilds = await getUserGuildsForDm(userDiscordId);
             if (guilds.length === 0) {
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: '参加中サーバーが見つかりません。先にサーバー内でBotコマンドを一度実行してください。',
+                content: COPY.register.noGuild,
                 flags: 64,
               });
               return;
@@ -338,14 +367,14 @@ export async function POST(req: NextRequest) {
             const result = await upsertRegistration(userDiscordId, unitePlayerId);
             const profileLine = buildRegisterProfileLine(result);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: `登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`,
+              content: COPY.register.success(unitePlayerId, profileLine),
               flags: 64,
             });
             console.log('[discord][interactions] register followup done', { userDiscordId, unitePlayerId });
           } catch (err) {
             console.log('[discord][interactions] register followup failed', err);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: '登録中にエラーが発生しました。少し待ってから再実行してください。',
+              content: COPY.register.error,
               flags: 64,
             }).catch(() => {});
           }
@@ -359,33 +388,33 @@ export async function POST(req: NextRequest) {
     }
 
     if (name === 'notify') {
-      if (!isDm) return ephemeral('/notify はDM専用です。');
+      if (!isDm) return ephemeral(COPY.notify.dmOnly);
       const mode = data?.data?.options?.find((o: { name?: string; value?: string }) => o.name === 'mode')?.value;
-      if (mode !== 'on' && mode !== 'off') return ephemeral('`/notify on` または `/notify off` を指定してください。');
+      if (mode !== 'on' && mode !== 'off') return ephemeral(COPY.notify.invalidMode);
       const guilds = await getUserGuildsForDm(userDiscordId);
-      if (guilds.length === 0) return ephemeral('対象サーバーが見つかりません。');
+      if (guilds.length === 0) return ephemeral(COPY.notify.noGuild);
       const svc = getServiceClient();
       await svc
         .from('discord_user_game_profiles')
         .update({ notify_enabled: mode === 'on', updated_at: nowIso() })
         .eq('discord_user_id', userDiscordId);
-      return ephemeral(`通知設定を ${mode.toUpperCase()} に更新しました。`);
+      return ephemeral(COPY.notify.updated(mode));
     }
 
     if (name === 'play') {
-      if (!isDm) return ephemeral('/play はDM専用です。');
+      if (!isDm) return ephemeral(COPY.play.dmOnly);
       const svc = getServiceClient();
       const { data: myProfile } = await svc
         .from('discord_user_game_profiles')
         .select('discord_user_id')
         .eq('discord_user_id', userDiscordId)
         .maybeSingle();
-      if (!myProfile) return ephemeral('登録が見つかりません。先に /register を実行してください。');
+      if (!myProfile) return ephemeral(COPY.play.notRegistered);
 
       const applicationId: string | undefined = data?.application_id;
       const interactionToken: string | undefined = data?.token;
       if (!applicationId || !interactionToken) {
-        return ephemeral('プレイ検索の情報を取得できませんでした。再実行してください。');
+        return ephemeral(COPY.play.responseMissing);
       }
 
       waitUntil(
@@ -400,7 +429,7 @@ export async function POST(req: NextRequest) {
           } catch (err) {
             console.log('[discord][interactions] play followup failed', err);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: 'プレイ状況の取得中にエラーが発生しました。少し待ってから再実行してください。',
+              content: COPY.play.fetchError,
               flags: 64,
             }).catch(() => {});
           }
@@ -413,114 +442,46 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    if (name === 'premium') {
+      if (!isDm) return ephemeral(COPY.premium.dmOnly);
+      if (!BILLING_FEATURE_ENABLED) return ephemeral(COPY.billing.wip);
+      try {
+        const payload = buildPremiumIntroPayload();
+        const premium = await ensurePremiumRow(userDiscordId);
+        const statusLine = formatPremiumStatusForUser(premium);
+        return ephemeralData({
+          content: `${payload.content}\n\n${statusLine}`,
+          embeds: payload.embeds,
+          components: payload.components,
+        });
+      } catch (err) {
+        console.log('[discord][interactions] premium command failed', err);
+        const message =
+          err instanceof Error && err.message.includes('is not set')
+            ? COPY.premium.configError
+            : COPY.premium.displayError;
+        return ephemeral(message);
+      }
+    }
+
     if (name === 'plan') {
-      if (!isDm) return ephemeral('/plan はDM専用です。');
+      if (!isDm) return ephemeral(COPY.plan.dmOnly);
+      if (!BILLING_FEATURE_ENABLED) return ephemeral(COPY.billing.wip);
       const sub = data?.data?.options?.[0]?.name as string | undefined;
 
-      if (sub === 'info') {
+      if (sub === 'info' || !sub) {
         const billing = await ensureBilling(userDiscordId);
         const count = await countDiscordFriends(userDiscordId);
-        return ephemeral(formatPlanStatus(billing, count));
+        const premium = await ensurePremiumRow(userDiscordId);
+        const lines = [formatPlanStatus(billing, count), '', formatPremiumStatusForUser(premium)];
+        return ephemeral(lines.join('\n'));
       }
 
-      if (sub === 'upgrade') {
-        const billing = await ensureBilling(userDiscordId);
-        if (billing.planId === 'plus') {
-          const count = await countDiscordFriends(userDiscordId);
-          return ephemeral(`すでに Plus プランです（${count}/${billing.maxFriendSlots}人）。`);
-        }
-
-        const applicationId: string | undefined = data?.application_id;
-        const interactionToken: string | undefined = data?.token;
-        if (!applicationId || !interactionToken) {
-          return ephemeral('決済の情報を取得できませんでした。再実行してください。');
-        }
-
-        waitUntil(
-          (async () => {
-            try {
-              const url = await createPlusCheckoutSession(userDiscordId);
-              await sendInteractionFollowup(applicationId, interactionToken, {
-                content: `**Plus プラン（${PLANS.plus.maxFriends}人まで）— 月額${PLANS.plus.priceYen}円**\n\n下のボタンから申し込みしてください。完了後は \`/plan info\` で反映を確認できます。`,
-                components: [
-                  {
-                    type: 1,
-                    components: [{ type: 2, style: 5, label: `月額${PLANS.plus.priceYen}円で申し込む`, url }],
-                  },
-                ],
-                flags: 64,
-              });
-            } catch (err) {
-              console.log('[discord][interactions] plan upgrade failed', err);
-              const message =
-                err instanceof Error && err.message === 'already_plus'
-                  ? 'すでに Plus プランです。'
-                  : '決済ページの作成に失敗しました。しばらく待ってから再実行してください。';
-              await sendInteractionFollowup(applicationId, interactionToken, {
-                content: message,
-                flags: 64,
-              }).catch(() => {});
-            }
-          })()
-        );
-
-        return jsonResponse({
-          type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
-          data: { flags: 64 },
-        });
-      }
-
-      if (sub === 'portal') {
-        const billing = await ensureBilling(userDiscordId);
-        if (billing.planId !== 'plus') {
-          return ephemeral('Plus プラン契約中のみ利用できます。先に `/plan upgrade` で申し込んでください。');
-        }
-
-        const applicationId: string | undefined = data?.application_id;
-        const interactionToken: string | undefined = data?.token;
-        if (!applicationId || !interactionToken) {
-          return ephemeral('ポータルの情報を取得できませんでした。再実行してください。');
-        }
-
-        waitUntil(
-          (async () => {
-            try {
-              const url = await createBillingPortalSession(userDiscordId);
-              await sendInteractionFollowup(applicationId, interactionToken, {
-                content: '解約・支払い方法の変更・請求履歴は下のボタンから Stripe のページで行えます。',
-                components: [
-                  {
-                    type: 1,
-                    components: [{ type: 2, style: 5, label: '契約を管理する', url }],
-                  },
-                ],
-                flags: 64,
-              });
-            } catch (err) {
-              console.log('[discord][interactions] plan portal failed', err);
-              const message =
-                err instanceof Error && err.message === 'no_customer'
-                  ? '契約情報が見つかりません。`/plan upgrade` から再度お申し込みください。'
-                  : '管理ページを開けませんでした。しばらく待ってから再実行してください。';
-              await sendInteractionFollowup(applicationId, interactionToken, {
-                content: message,
-                flags: 64,
-              }).catch(() => {});
-            }
-          })()
-        );
-
-        return jsonResponse({
-          type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
-          data: { flags: 64 },
-        });
-      }
-
-      return ephemeral('`/plan info` / `/plan upgrade` / `/plan portal` を利用してください。');
+      return ephemeral(COPY.plan.usePremium);
     }
 
     if (name === 'friend') {
-      if (!isDm) return ephemeral('/friend はDM専用です。');
+      if (!isDm) return ephemeral(COPY.friend.dmOnly);
       const sub = data?.data?.options?.[0]?.name as string | undefined;
 
       if (sub === 'code') {
@@ -529,21 +490,21 @@ export async function POST(req: NextRequest) {
 
       if (sub === 'request') {
         const rawCode = data?.data?.options?.[0]?.options?.find((o: { name?: string; value?: string }) => o.name === 'code')?.value;
-        if (!rawCode || typeof rawCode !== 'string') return ephemeral('code を指定してください。');
+        if (!rawCode || typeof rawCode !== 'string') return ephemeral(COPY.friend.requestNeedCode);
         const applicationId: string | undefined = data?.application_id;
         const interactionToken: string | undefined = data?.token;
         if (!applicationId || !interactionToken) {
-          return ephemeral('申請レスポンスの情報を取得できませんでした。再実行してください。');
+          return ephemeral(COPY.friend.requestResponseMissing);
         }
 
         const friendRequestErrorMessages: Record<string, string> = {
-          invalid_code: 'コードが見つかりません。形式は8文字の英数字です。',
-          expired: 'このコードは有効期限切れです。相手に /friend code で再発行してもらってください。',
-          self: '自分のコードには申請できません。',
-          already_friends: 'すでにフレンドです。',
-          already_pending: '同じ相手への申請が保留中です。',
-          owner_not_registered: 'コードの発行者がまだ /register していません。',
-          requester_not_registered: '先に /register でゲーム内IDを登録してください。',
+          invalid_code: COPY.friend.errors.invalid_code,
+          expired: COPY.friend.errors.expired,
+          self: COPY.friend.errors.self,
+          already_friends: COPY.friend.errors.already_friends,
+          already_pending: COPY.friend.errors.already_pending,
+          owner_not_registered: COPY.friend.errors.owner_not_registered,
+          requester_not_registered: COPY.friend.errors.requester_not_registered,
         };
 
         waitUntil(
@@ -552,7 +513,7 @@ export async function POST(req: NextRequest) {
               const result = await submitFriendRequest(userDiscordId, rawCode);
               if (!result.ok) {
                 await sendInteractionFollowup(applicationId, interactionToken, {
-                  content: friendRequestErrorMessages[result.reason] ?? '申請に失敗しました。',
+                  content: friendRequestErrorMessages[result.reason] ?? COPY.friend.errors.request_failed,
                   flags: 64,
                 });
                 return;
@@ -569,33 +530,32 @@ export async function POST(req: NextRequest) {
               );
               try {
                 await sendDiscordDM(result.ownerDiscordUserId, {
-                  content: `🎮 **フレンド申請**が届きました\n${displayName} さんから申請があります。`,
+                  content: COPY.friend.requestDmToOwner(displayName),
                   components: [
                     {
                       type: 1,
                       components: [
-                        { type: 2, style: 3, label: '承認', custom_id: `friend:req:approve:${result.requestId}` },
-                        { type: 2, style: 4, label: '拒否', custom_id: `friend:req:reject:${result.requestId}` },
+                        { type: 2, style: 3, label: COPY.friend.approveBtn, custom_id: `friend:req:approve:${result.requestId}` },
+                        { type: 2, style: 4, label: COPY.friend.rejectBtn, custom_id: `friend:req:reject:${result.requestId}` },
                       ],
                     },
                   ],
                 });
               } catch {
                 await sendInteractionFollowup(applicationId, interactionToken, {
-                  content:
-                    '申請は登録しましたが、相手への DM を送れませんでした。相手に /friend pending を実行してもらってください。',
+                  content: COPY.friend.requestDmFailed,
                   flags: 64,
                 });
                 return;
               }
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: 'フレンド申請を送信しました。相手が承認するとフレンドになります。',
+                content: COPY.friend.requestSentOk,
                 flags: 64,
               });
             } catch (err) {
               console.log('[discord][interactions] friend request followup failed', err);
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: '申請中にエラーが発生しました。少し待ってから再実行してください。',
+                content: COPY.friend.requestError,
                 flags: 64,
               }).catch(() => {});
             }
@@ -610,7 +570,7 @@ export async function POST(req: NextRequest) {
 
       if (sub === 'list') {
         const friends = await listDiscordFriends(userDiscordId);
-        return ephemeral(`**フレンド一覧**（${friends.length}人）\n${formatFriendListLines(friends)}`);
+        return ephemeral(`${COPY.friend.listHeader(friends.length)}\n${formatFriendListLines(friends)}`);
       }
 
       if (sub === 'manage') {
@@ -620,26 +580,24 @@ export async function POST(req: NextRequest) {
 
       if (sub === 'pending') {
         const pending = await listPendingFriendRequests(userDiscordId);
-        if (pending.length === 0) return ephemeral('保留中のフレンド申請はありません。');
+        if (pending.length === 0) return ephemeral(COPY.friend.pendingEmpty);
         const lines = pending.map((p) => formatPendingRequestLine(p)).join('\n');
         const components = pending.slice(0, 5).flatMap((p) => [
           {
             type: 1,
             components: [
-              { type: 2, style: 3, label: '承認', custom_id: `friend:req:approve:${p.id}` },
-              { type: 2, style: 4, label: '拒否', custom_id: `friend:req:reject:${p.id}` },
+              { type: 2, style: 3, label: COPY.friend.approveBtn, custom_id: `friend:req:approve:${p.id}` },
+              { type: 2, style: 4, label: COPY.friend.rejectBtn, custom_id: `friend:req:reject:${p.id}` },
             ],
           },
         ]);
-        return ephemeral(`**保留中の申請**（${pending.length}件）\n${lines}`, components);
+        return ephemeral(`${COPY.friend.pendingHeader(pending.length)}\n${lines}`, components);
       }
 
-      return ephemeral(
-        '未対応の /friend サブコマンドです。/friend code / request / list / manage / pending を利用してください。'
-      );
+      return ephemeral(COPY.friend.unknownSub);
     }
 
-    return ephemeral('未対応のコマンドです');
+    return ephemeral(COPY.common.unknownCommand);
   }
 
   // MESSAGE_COMPONENT
@@ -647,25 +605,23 @@ export async function POST(req: NextRequest) {
     const customId: string = data?.data?.custom_id;
     const userDiscordId: string | undefined = data?.member?.user?.id || data?.user?.id;
     const selectedValues: string[] = Array.isArray(data?.data?.values) ? data.data.values : [];
-    if (!userDiscordId) return ephemeral('Discordユーザー情報を取得できませんでした。');
+    if (!userDiscordId) return ephemeral(COPY.common.noUser);
 
     if (customId === 'unite:setup_open_dm') {
-      const dmText =
-        '🎮 UniteFriendsへようこそ！\n\nまずは /register ゲーム内ID で登録してください。\n\nフレンド追加:\n1. /friend code でコード発行\n2. 相手に /friend request コード を実行してもらう\n3. DMの通知から承認\n\n/play でフレンドのプレイ状況を確認できます。';
       try {
-        await sendDiscordDM(userDiscordId, { content: dmText });
-        return ephemeral('DMを送信しました。DM内で `/register` を実行してください。');
+        await sendDiscordDM(userDiscordId, { content: COPY.setup.dmWelcome });
+        return ephemeral(COPY.setup.dmSentOk);
       } catch {
-        return ephemeral('DMできませんでした。Discordのプライバシー設定でDMを許可してください。');
+        return ephemeral(COPY.setup.dmSentNg);
       }
     }
 
     if (customId.startsWith('register:guild_select:')) {
       const unitePlayerId = customId.replace('register:guild_select:', '');
-      if (!unitePlayerId) return ephemeral('登録情報が不足しています。');
+      if (!unitePlayerId) return ephemeral(COPY.register.missingInfo);
       const result = await upsertRegistration(userDiscordId, unitePlayerId);
       const profileLine = buildRegisterProfileLine(result);
-      return ephemeral(`登録しました。\nゲーム内ID: ${unitePlayerId}\n${profileLine}\n\n次は /play を実行してください。`);
+      return ephemeral(COPY.register.success(unitePlayerId, profileLine));
     }
 
     if (customId === FRIEND_CODE_ISSUE_BUTTON_ID) {
@@ -674,23 +630,23 @@ export async function POST(req: NextRequest) {
         await sendDiscordDM(userDiscordId, { content: code });
         return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
       } catch {
-        return ephemeral('コードを送れませんでした。Discordのプライバシー設定でDMを許可してください。');
+        return ephemeral(COPY.friend.codeDmFailed);
       }
     }
 
     if (customId.startsWith('friend:remove:')) {
       const friendDiscordUserId = customId.replace('friend:remove:', '');
-      if (!friendDiscordUserId) return ephemeral('削除対象が不正です。');
+      if (!friendDiscordUserId) return ephemeral(COPY.friend.removeInvalid);
       const result = await removeDiscordFriend(userDiscordId, friendDiscordUserId);
       if (!result.ok) {
         const messages: Record<string, string> = {
-          self: '自分自身は削除できません。',
-          not_friends: 'このユーザーはフレンドではありません。',
+          self: COPY.friend.removeSelf,
+          not_friends: COPY.friend.removeNotFriend,
         };
-        return ephemeral(messages[result.reason] ?? '削除に失敗しました。');
+        return ephemeral(messages[result.reason] ?? COPY.friend.removeFailed);
       }
       const friends = await listDiscordFriends(userDiscordId);
-      const payload = buildFriendManagePayload(friends, `**${result.displayName}** をフレンドから外しました。`);
+      const payload = buildFriendManagePayload(friends, COPY.friend.removed(result.displayName));
       return jsonResponse({
         type: InteractionResponseType.UPDATE_MESSAGE,
         data: payload,
@@ -702,14 +658,14 @@ export async function POST(req: NextRequest) {
       const applicationId: string | undefined = data?.application_id;
       const interactionToken: string | undefined = data?.token;
       if (!applicationId || !interactionToken) {
-        return ephemeral('承認レスポンスの情報を取得できませんでした。再実行してください。');
+        return ephemeral(COPY.friend.approveResponseMissing);
       }
       const approveErrorMessages: Record<string, string> = {
-        not_found: '申請が見つかりません。',
-        not_owner: 'この申請を承認する権限がありません。',
-        not_pending: 'この申請はすでに処理済みです。',
-        already_friends: 'すでにフレンドです。',
-        friend_limit_reached: `フレンド枠の上限に達しています（無料は${PLANS.free.maxFriends}人まで）。\`/plan upgrade\` で月額${PLANS.plus.priceYen}円の5人枠にできます。`,
+        not_found: COPY.friend.errors.approve_not_found,
+        not_owner: COPY.friend.errors.approve_not_owner,
+        not_pending: COPY.friend.errors.approve_not_pending,
+        already_friends: COPY.friend.errors.approve_already_friends,
+        friend_limit_reached: COPY.friend.errors.approve_limit(ACTIVE_FRIEND_SLOT_LIMIT),
       };
 
       waitUntil(
@@ -718,26 +674,26 @@ export async function POST(req: NextRequest) {
             const result = await approveFriendRequest(requestId, userDiscordId);
             if (!result.ok) {
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: approveErrorMessages[result.reason] ?? '承認に失敗しました。',
+                content: approveErrorMessages[result.reason] ?? COPY.friend.errors.approve_failed,
                 flags: 64,
               });
               return;
             }
             try {
               await sendDiscordDM(result.requesterDiscordUserId, {
-                content: '🎮 フレンド申請が**承認**されました。/play でプレイ状況を確認できます。',
+                content: COPY.friend.approvedDmToRequester,
               });
             } catch {
               // DM 失敗は握りつぶす
             }
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: `フレンド申請を承認しました。\n\n**フレンド一覧**（${result.friends.length}人）\n${formatFriendListLines(result.friends)}`,
+              content: COPY.friend.approvedOk(result.friends.length, formatFriendListLines(result.friends)),
               flags: 64,
             });
           } catch (err) {
             console.log('[discord][interactions] friend approve followup failed', err);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: '承認中にエラーが発生しました。少し待ってから再実行してください。',
+              content: COPY.friend.approveError,
               flags: 64,
             }).catch(() => {});
           }
@@ -755,7 +711,7 @@ export async function POST(req: NextRequest) {
       const applicationId: string | undefined = data?.application_id;
       const interactionToken: string | undefined = data?.token;
       if (!applicationId || !interactionToken) {
-        return ephemeral('拒否レスポンスの情報を取得できませんでした。再実行してください。');
+        return ephemeral(COPY.friend.rejectResponseMissing);
       }
 
       waitUntil(
@@ -770,7 +726,7 @@ export async function POST(req: NextRequest) {
             const result = await rejectFriendRequest(requestId, userDiscordId);
             if (!result.ok) {
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: '申請の拒否に失敗しました。すでに処理済みの可能性があります。',
+                content: COPY.friend.rejectFailed,
                 flags: 64,
               });
               return;
@@ -778,20 +734,20 @@ export async function POST(req: NextRequest) {
             if (req?.requester_discord_user_id) {
               try {
                 await sendDiscordDM(req.requester_discord_user_id as string, {
-                  content: '🎮 フレンド申請は拒否されました。',
+                  content: COPY.friend.rejectedDmToRequester,
                 });
               } catch {
                 // ignore
               }
             }
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: 'フレンド申請を拒否しました。',
+              content: COPY.friend.rejectedOk,
               flags: 64,
             });
           } catch (err) {
             console.log('[discord][interactions] friend reject followup failed', err);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: '拒否中にエラーが発生しました。少し待ってから再実行してください。',
+              content: COPY.friend.rejectError,
               flags: 64,
             }).catch(() => {});
           }
@@ -813,14 +769,14 @@ export async function POST(req: NextRequest) {
         },
         body: JSON.stringify({ owner_discord_id: userDiscordId }),
       });
-      return ephemeral('チェックを実行しました。');
+      return ephemeral(COPY.notify.pingDone);
     }
 
     if (customId === 'play:invite_all') {
       const applicationId: string | undefined = data?.application_id;
       const interactionToken: string | undefined = data?.token;
       if (!applicationId || !interactionToken) {
-        return ephemeral('一括招待の情報を取得できませんでした。再実行してください。');
+        return ephemeral(COPY.play.inviteAllResponseMissing);
       }
 
       waitUntil(
@@ -830,7 +786,7 @@ export async function POST(req: NextRequest) {
             const targets = rows.filter((r) => r.unitePlayerId);
             if (targets.length === 0) {
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: '招待できるフレンドがいません。',
+                content: COPY.play.noInviteTargets,
                 flags: 64,
               });
               return;
@@ -848,11 +804,11 @@ export async function POST(req: NextRequest) {
               }
             }
             const failLine =
-              failed.length > 0 ? `\n\n誘えなかった相手: ${failed.slice(0, 5).join('、')}` : '';
+              failed.length > 0 ? COPY.play.inviteAllFailSuffix(failed.slice(0, 5).join('、')) : '';
             const content =
               invited.length > 0
-                ? `**${invited.join('、')}** に誘ってみたよ。${failLine}`
-                : `誘えた相手がいませんでした。${failLine}`;
+                ? COPY.play.inviteAllSent(invited.join('、'), failLine)
+                : COPY.play.inviteAllNone(failLine);
             await sendInteractionFollowup(applicationId, interactionToken, {
               content,
               flags: 64,
@@ -860,7 +816,7 @@ export async function POST(req: NextRequest) {
           } catch (err) {
             console.log('[discord][interactions] play invite_all failed', err);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: '一括招待中にエラーが発生しました。',
+              content: COPY.play.inviteAllError,
               flags: 64,
             }).catch(() => {});
           }
@@ -875,11 +831,11 @@ export async function POST(req: NextRequest) {
 
     if (customId.startsWith('play:invite:')) {
       const targetDiscordUserId = customId.replace('play:invite:', '');
-      if (!targetDiscordUserId) return ephemeral('招待先が不正です。');
+      if (!targetDiscordUserId) return ephemeral(COPY.play.invalidTarget);
       const applicationId: string | undefined = data?.application_id;
       const interactionToken: string | undefined = data?.token;
       if (!applicationId || !interactionToken) {
-        return ephemeral('招待の情報を取得できませんでした。再実行してください。');
+        return ephemeral(COPY.play.inviteResponseMissing);
       }
 
       waitUntil(
@@ -887,7 +843,7 @@ export async function POST(req: NextRequest) {
           try {
             if (!(await areFriends(userDiscordId, targetDiscordUserId))) {
               await sendInteractionFollowup(applicationId, interactionToken, {
-                content: 'フレンド以外には招待できません。',
+                content: COPY.play.notFriend,
                 flags: 64,
               });
               return;
@@ -896,13 +852,13 @@ export async function POST(req: NextRequest) {
             const targetName = await getPlaySenderDisplayName(targetDiscordUserId);
             await sendDiscordDM(targetDiscordUserId, buildPlayInvitePayload(senderName, userDiscordId));
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: `**${targetName}** に誘ってみたよ。`,
+              content: COPY.play.inviteSent(targetName),
               flags: 64,
             });
           } catch (err) {
             console.log('[discord][interactions] play invite failed', err);
             await sendInteractionFollowup(applicationId, interactionToken, {
-              content: '招待を送れませんでした。相手のDM設定を確認してください。',
+              content: COPY.play.inviteFailed,
               flags: 64,
             }).catch(() => {});
           }
@@ -920,14 +876,14 @@ export async function POST(req: NextRequest) {
       const replyCode = parts[2];
       const senderDiscordUserId = parts[3];
       const message = PLAY_REPLY_MESSAGES[replyCode];
-      if (!message || !senderDiscordUserId) return ephemeral('返信の処理に失敗しました。');
+      if (!message || !senderDiscordUserId) return ephemeral(COPY.play.replyFailed);
 
       waitUntil(
         (async () => {
           try {
             const responderName = await getPlaySenderDisplayName(userDiscordId);
             await sendDiscordDM(senderDiscordUserId, {
-              content: `🎮 **${responderName}** さん: ${message}`,
+              content: COPY.play.replyNotify(responderName, message),
             });
           } catch (err) {
             console.log('[discord][interactions] play reply failed', err);
@@ -941,10 +897,154 @@ export async function POST(req: NextRequest) {
     if (customId === 'play:close') {
       return jsonResponse({
         type: InteractionResponseType.UPDATE_MESSAGE,
-        data: { content: 'このメニューは閉じました。', components: [], embeds: [] },
+        data: { content: COPY.play.menuClosed, components: [], embeds: [] },
       });
     }
-    return ephemeral('未対応のボタンです');
+
+    if (customId === PREMIUM_REPORT_BUTTON_ID) {
+      if (!BILLING_FEATURE_ENABLED) return ephemeral(COPY.billing.wip);
+      if (data?.guild_id) {
+        return ephemeral(COPY.premium.reportInDm);
+      }
+      try {
+        return jsonResponse({
+          type: InteractionResponseType.MODAL,
+          data: buildPaymentReportModal(),
+        });
+      } catch (err) {
+        console.log('[discord][interactions] premium modal failed', err);
+        return ephemeral(COPY.premium.modalFailed);
+      }
+    }
+
+    if (customId.startsWith('premium:req:approve:')) {
+      if (!canReviewPremiumPayment(data)) {
+        return ephemeral(COPY.common.adminOnly);
+      }
+      const requestId = customId.replace('premium:req:approve:', '');
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('承認処理の返信が作れなかった… もう一回試してね');
+      }
+
+      waitUntil(
+        (async () => {
+          try {
+            const result = await approvePaymentRequest(requestId, userDiscordId);
+            const originalContent = data?.message?.content ?? '';
+            if (!result.ok) {
+              await editDeferredInteractionMessage(applicationId, interactionToken, {
+                content: `${originalContent}\n\n---\n⚠️ ${result.message}`,
+                components: [],
+              }).catch(() => {});
+              return;
+            }
+            await editDeferredInteractionMessage(applicationId, interactionToken, {
+              content: `${originalContent}\n\n---\n✅ **承認済み**（<@${userDiscordId}>）`,
+              components: [],
+            });
+          } catch (err) {
+            console.log('[discord][interactions] premium approve failed', err);
+            await editDeferredInteractionMessage(applicationId, interactionToken, {
+              content: `${data?.message?.content ?? ''}\n\n---\n⚠️ 承認処理中にエラーが発生しました。`,
+              components: [],
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+    }
+
+    if (customId.startsWith('premium:req:reject:')) {
+      if (!canReviewPremiumPayment(data)) {
+        return ephemeral(COPY.common.adminOnly);
+      }
+      const requestId = customId.replace('premium:req:reject:', '');
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      if (!applicationId || !interactionToken) {
+        return ephemeral('却下処理の返信が作れなかった… もう一回試してね');
+      }
+
+      waitUntil(
+        (async () => {
+          try {
+            const result = await rejectPaymentRequest(requestId, userDiscordId);
+            const originalContent = data?.message?.content ?? '';
+            if (!result.ok) {
+              await editDeferredInteractionMessage(applicationId, interactionToken, {
+                content: `${originalContent}\n\n---\n⚠️ ${result.message}`,
+                components: [],
+              }).catch(() => {});
+              return;
+            }
+            await editDeferredInteractionMessage(applicationId, interactionToken, {
+              content: `${originalContent}\n\n---\n❌ **却下済み**（<@${userDiscordId}>）`,
+              components: [],
+            });
+          } catch (err) {
+            console.log('[discord][interactions] premium reject failed', err);
+            await editDeferredInteractionMessage(applicationId, interactionToken, {
+              content: `${data?.message?.content ?? ''}\n\n---\n⚠️ 却下処理中にエラーが発生しました。`,
+              components: [],
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+    }
+
+    return ephemeral(COPY.common.unknownButton);
+  }
+
+  if (data?.type === InteractionType.MODAL_SUBMIT) {
+    const modalId: string = data?.data?.custom_id;
+    const userDiscordId: string | undefined = data?.member?.user?.id || data?.user?.id;
+    if (!userDiscordId) return ephemeral(COPY.common.noUser);
+
+    if (modalId === PREMIUM_MODAL_ID) {
+      if (!BILLING_FEATURE_ENABLED) return ephemeral(COPY.billing.wip);
+      const applicationId: string | undefined = data?.application_id;
+      const interactionToken: string | undefined = data?.token;
+      const username = discordUsernameFromInteraction(data);
+
+      waitUntil(
+        (async () => {
+          if (!applicationId || !interactionToken) return;
+          try {
+            const values = parseModalValues(data.data);
+            const result = await createPaymentRequest(userDiscordId, username, values);
+            if (!result.ok) {
+              await sendInteractionFollowup(applicationId, interactionToken, {
+                content: result.message,
+                flags: 64,
+              });
+              return;
+            }
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: COPY.premium.reportAccepted,
+              flags: 64,
+            });
+          } catch (err) {
+            console.log('[discord][interactions] premium modal submit failed', err);
+            await sendInteractionFollowup(applicationId, interactionToken, {
+              content: COPY.premium.reportSaveError,
+              flags: 64,
+            }).catch(() => {});
+          }
+        })()
+      );
+
+      return jsonResponse({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
+    }
+
+    return ephemeral(COPY.common.unknownModal);
   }
 
   return new Response('OK');

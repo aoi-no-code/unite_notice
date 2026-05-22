@@ -1,3 +1,4 @@
+import { COPY } from './botCopy';
 import { formatRequesterDisplayName, listDiscordFriends } from './discordFriends';
 import { getServiceClient } from './db';
 import { fetchLatestMatchSummary } from './unite';
@@ -45,7 +46,7 @@ export async function buildPlayFriendRows(ownerDiscordUserId: string): Promise<P
         discordUserId: friend.discordUserId,
         displayName,
         unitePlayerId: null,
-        timeAgoLabel: '未登録',
+        timeAgoLabel: COPY.play.statusUnregistered,
         partyLabel: null,
       });
       continue;
@@ -58,14 +59,14 @@ export async function buildPlayFriendRows(ownerDiscordUserId: string): Promise<P
       discordUserId: friend.discordUserId,
       displayName,
       unitePlayerId: profile.unitePlayerId,
-      timeAgoLabel: summary?.timeAgoLabel ?? '対戦履歴なし',
+      timeAgoLabel: summary?.timeAgoLabel ?? COPY.play.statusNoHistory,
       partyLabel: summary?.partyLabel ?? null,
     });
   }
 
   rows.sort((a, b) => {
-    if (a.timeAgoLabel === '未登録' || a.timeAgoLabel === '対戦履歴なし') return 1;
-    if (b.timeAgoLabel === '未登録' || b.timeAgoLabel === '対戦履歴なし') return -1;
+    if (a.timeAgoLabel === COPY.play.statusUnregistered || a.timeAgoLabel === COPY.play.statusNoHistory) return 1;
+    if (b.timeAgoLabel === COPY.play.statusUnregistered || b.timeAgoLabel === COPY.play.statusNoHistory) return -1;
     return a.displayName.localeCompare(b.displayName, 'ja');
   });
 
@@ -75,7 +76,7 @@ export async function buildPlayFriendRows(ownerDiscordUserId: string): Promise<P
 export function buildPlayListPayload(rows: PlayFriendRow[]) {
   if (rows.length === 0) {
     return {
-      content: 'フレンドがいません。`/friend code` でフレンドを追加してください。',
+      content: COPY.play.noFriends,
       components: [] as unknown[],
       embeds: [] as unknown[],
     };
@@ -97,7 +98,7 @@ export function buildPlayListPayload(rows: PlayFriendRow[]) {
       components: chunk.map((row) => ({
         type: 2,
         style: 1,
-        label: `誘う: ${row.displayName}`.slice(0, 80),
+        label: COPY.play.inviteButton(row.displayName).slice(0, 80),
         custom_id: `play:invite:${row.discordUserId}`,
       })),
     });
@@ -106,23 +107,23 @@ export function buildPlayListPayload(rows: PlayFriendRow[]) {
     components.push({
       type: 1,
       components: [
-        { type: 2, style: 1, label: '一括で誘う', custom_id: 'play:invite_all' },
-        { type: 2, style: 2, label: '閉じる', custom_id: 'play:close' },
+        { type: 2, style: 1, label: COPY.play.inviteAll, custom_id: 'play:invite_all' },
+        { type: 2, style: 2, label: COPY.play.close, custom_id: 'play:close' },
       ],
     });
   }
 
   return {
-    content: '**フレンドの最新対戦**（フレンドのみ表示）',
-    embeds: [{ title: '🎮 /play', description, color: 0x57f287 }],
+    content: COPY.play.listHeader,
+    embeds: [{ title: COPY.play.embedTitle, description, color: 0x57f287 }],
     components,
   };
 }
 
 export const PLAY_REPLY_MESSAGES: Record<string, string> = {
-  '1': 'インするね！',
-  '2': '次やろ！',
-  '3': 'ちょっと待ってね、色々あってまたやろ！',
+  '1': COPY.play.reply1,
+  '2': COPY.play.reply2,
+  '3': COPY.play.reply3,
 };
 
 export async function getPlaySenderDisplayName(discordUserId: string): Promise<string> {
@@ -140,17 +141,17 @@ export async function getPlaySenderDisplayName(discordUserId: string): Promise<s
 
 export function buildPlayInvitePayload(senderDisplayName: string, senderDiscordUserId: string) {
   return {
-    content: `🎮 **${senderDisplayName}** さんから\n一緒にやらない？`,
+    content: COPY.play.inviteDm(senderDisplayName),
     components: [
       {
         type: 1,
         components: [
-          { type: 2, style: 3, label: 'インするね！', custom_id: `play:reply:1:${senderDiscordUserId}` },
-          { type: 2, style: 3, label: '次やろ！', custom_id: `play:reply:2:${senderDiscordUserId}` },
+          { type: 2, style: 3, label: COPY.play.reply1, custom_id: `play:reply:1:${senderDiscordUserId}` },
+          { type: 2, style: 3, label: COPY.play.reply2, custom_id: `play:reply:2:${senderDiscordUserId}` },
           {
             type: 2,
             style: 2,
-            label: 'また今度やろ',
+            label: COPY.play.replyBtn3,
             custom_id: `play:reply:3:${senderDiscordUserId}`,
           },
         ],

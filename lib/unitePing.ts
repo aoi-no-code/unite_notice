@@ -1,4 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
+import { COPY } from './botCopy';
 import { fetchLastOnline, fetchLatestBattleAt } from './unite';
 import { sendDiscord, sendDiscordDM } from './discord';
 
@@ -48,9 +49,7 @@ export async function runUnitePing(options: PingOptions): Promise<{ notified: nu
     if (activityAt < activeThreshold) continue;
 
     const label = (fr.trainer_name as string | null) || trainerId;
-    const content = `今やろう？ ${label} さんがアクティブかも（最新バトル: <t:${Math.floor(
-      activityAt.getTime() / 1000
-    )}:R>）`;
+    const content = COPY.ping.active(label, Math.floor(activityAt.getTime() / 1000));
 
     try {
       await sendDiscordDM(ownerDiscordId, { content });

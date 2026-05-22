@@ -1,9 +1,11 @@
-import Stripe from 'stripe';
+import { ACTIVE_FRIEND_SLOT_LIMIT, BILLING_FEATURE_ENABLED, COPY } from './botCopy';
 import { getServiceClient } from './db';
 import { listDiscordFriends } from './discordFriends';
+import { getPremiumRow, isPremiumRowActive } from './premium';
 
 export type PlanId = 'free' | 'plus';
 
+/** @deprecated Stripe サブスク状態（PayPay手動確認に移行済み） */
 export type SubscriptionStatus =
   | 'active'
   | 'trialing'
@@ -21,7 +23,9 @@ export type BillingState = {
   maxFriendSlots: number;
   subscriptionStatus: SubscriptionStatus;
   currentPeriodEnd: string | null;
+  /** @deprecated Stripe Customer ID */
   stripeCustomerId: string | null;
+  premiumUntil: string | null;
 };
 
 type BillingRow = {
@@ -48,35 +52,24 @@ export const PLANS: Record<
   },
   plus: {
     id: 'plus',
-    label: 'Plus',
+    label: 'Plus（プレミアム）',
     maxFriends: 5,
     priceYen: 300,
-    description: 'フレンド5人まで（月額300円）',
+    description: 'フレンド5人まで（PayPay・月額）',
   },
 };
 
-const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
+async function isPlusActive(discordUserId: string, row: BillingRow): Promise<boolean> {
+  const premium = await getPremiumRow(discordUserId);
+  if (isPremiumRowActive(premium)) return true;
 
-function stripeClient(): Stripe {
-  const key = process.env.STRIPE_SECRET_KEY;
-  if (!key) throw new Error('STRIPE_SECRET_KEY is not set');
-  return new Stripe(key, { apiVersion: '2025-02-24.acacia' });
-}
-
-function isPlusSubscriptionActive(row: BillingRow): boolean {
-  if (!row.stripe_subscription_id) {
-    return row.plan_id === 'plus';
-  }
-  const status = row.subscription_status;
-  if (status && ACTIVE_SUBSCRIPTION_STATUSES.has(status)) return true;
-  if (row.current_period_end) {
-    return new Date(row.current_period_end).getTime() > Date.now();
-  }
+  // --- Stripe（無効化・後で復帰可能） ---
+  // const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
+  // if (row.stripe_subscription_id) { ... }
   return false;
 }
 
-function rowToBillingState(row: BillingRow): BillingState {
-  const plusActive = isPlusSubscriptionActive(row);
+function rowToBillingState(row: BillingRow, plusActive: boolean, premiumUntil: string | null): BillingState {
   const planId: PlanId = plusActive ? 'plus' : 'free';
   const plan = PLANS[planId];
   return {
@@ -84,8 +77,9 @@ function rowToBillingState(row: BillingRow): BillingState {
     planId,
     maxFriendSlots: plan.maxFriends,
     subscriptionStatus: (row.subscription_status as SubscriptionStatus) ?? null,
-    currentPeriodEnd: row.current_period_end,
+    currentPeriodEnd: premiumUntil ?? row.current_period_end,
     stripeCustomerId: row.stripe_customer_id,
+    premiumUntil,
   };
 }
 
@@ -99,9 +93,13 @@ export async function ensureBilling(discordUserId: string): Promise<BillingState
     .eq('discord_user_id', discordUserId)
     .maybeSingle();
 
+  const premium = await getPremiumRow(discordUserId);
+  const premiumUntil = isPremiumRowActive(premium) ? premium!.premium_until : null;
+
   if (existing) {
-    const state = rowToBillingState(existing as BillingRow);
-    if (state.planId === 'free' && (existing as BillingRow).plan_id === 'plus' && !isPlusSubscriptionActive(existing as BillingRow)) {
+    const plusActive = await isPlusActive(discordUserId, existing as BillingRow);
+    const state = rowToBillingState(existing as BillingRow, plusActive, premiumUntil);
+    if (state.planId === 'free' && (existing as BillingRow).plan_id === 'plus' && !plusActive) {
       await applyFreePlan(discordUserId);
       return ensureBilling(discordUserId);
     }
@@ -123,6 +121,7 @@ export async function ensureBilling(discordUserId: string): Promise<BillingState
     subscriptionStatus: null,
     currentPeriodEnd: null,
     stripeCustomerId: null,
+    premiumUntil: null,
   };
 }
 
@@ -137,8 +136,18 @@ export async function canAddFriend(discordUserId: string): Promise<{
   max: number;
   planId: PlanId;
 }> {
-  const billing = await ensureBilling(discordUserId);
   const current = await countDiscordFriends(discordUserId);
+  if (!BILLING_FEATURE_ENABLED) {
+    const max = ACTIVE_FRIEND_SLOT_LIMIT;
+    return {
+      ok: current < max,
+      current,
+      max,
+      planId: 'free',
+    };
+  }
+
+  const billing = await ensureBilling(discordUserId);
   return {
     ok: current < billing.maxFriendSlots,
     current,
@@ -148,22 +157,30 @@ export async function canAddFriend(discordUserId: string): Promise<{
 }
 
 export function formatPlanStatus(billing: BillingState, friendCount: number): string {
+  if (!BILLING_FEATURE_ENABLED) {
+    const free = PLANS.free;
+    return [
+      COPY.plan.currentPlan(free.label, ACTIVE_FRIEND_SLOT_LIMIT),
+      COPY.plan.friendCount(friendCount, ACTIVE_FRIEND_SLOT_LIMIT),
+      '',
+      COPY.billing.wip,
+    ].join('\n');
+  }
+
   const plan = PLANS[billing.planId];
   const lines = [
-    `**現在のプラン:** ${plan.label}（${plan.maxFriends}人まで）`,
-    `**フレンド:** ${friendCount}/${billing.maxFriendSlots}人`,
+    COPY.plan.currentPlan(plan.label, plan.maxFriends),
+    COPY.plan.friendCount(friendCount, billing.maxFriendSlots),
   ];
   if (billing.planId === 'plus') {
-    if (billing.currentPeriodEnd) {
-      lines.push(`**次回更新:** ${new Date(billing.currentPeriodEnd).toLocaleString('ja-JP')}`);
+    if (billing.premiumUntil || billing.currentPeriodEnd) {
+      const end = billing.premiumUntil ?? billing.currentPeriodEnd;
+      lines.push(COPY.plan.premiumUntil(new Date(end!).toLocaleString('ja-JP')));
     }
-    lines.push('', '解約・支払い方法の変更は `/plan portal` から行えます。');
+    lines.push('', COPY.plan.premiumRenew);
   } else {
-    lines.push(
-      '',
-      `5人まで使うには **月額${PLANS.plus.priceYen}円** の Plus プランが必要です。`,
-      '`/plan upgrade` で申し込みできます。'
-    );
+    const price = process.env.PREMIUM_PRICE ?? String(PLANS.plus.priceYen);
+    lines.push('', COPY.plan.premiumUpsell(price));
   }
   return lines.join('\n');
 }
@@ -185,171 +202,45 @@ export async function applyFreePlan(discordUserId: string): Promise<void> {
   if (error) throw error;
 }
 
-export async function syncStripeSubscription(
-  discordUserId: string,
-  subscription: Stripe.Subscription
-): Promise<void> {
-  const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
-  const customerId =
-    typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id ?? null;
+// =============================================================================
+// Stripe（無効化 — PayPay手動確認に移行。復帰時はコメントを戻して利用）
+// =============================================================================
 
-  const plusActive =
-    ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status) ||
-    (subscription.status === 'canceled' && subscription.cancel_at_period_end && subscription.current_period_end * 1000 > Date.now());
+const STRIPE_DISABLED_MESSAGE =
+  'Stripe課金は現在無効です。`/premium` からPayPay送金でお申し込みください。';
 
-  const svc = getServiceClient();
-  const now = new Date().toISOString();
-
-  if (plusActive) {
-    const plus = PLANS.plus;
-    const { error } = await svc.from('discord_user_billing').upsert(
-      {
-        discord_user_id: discordUserId,
-        plan_id: plus.id,
-        max_friend_slots: plus.maxFriends,
-        stripe_customer_id: customerId,
-        stripe_subscription_id: subscription.id,
-        subscription_status: subscription.status,
-        current_period_end: periodEnd,
-        paid_at: now,
-        updated_at: now,
-      },
-      { onConflict: 'discord_user_id' }
-    );
-    if (error) throw error;
-    return;
-  }
-
-  await applyFreePlan(discordUserId);
-  await svc
-    .from('discord_user_billing')
-    .update({
-      stripe_subscription_id: subscription.id,
-      stripe_customer_id: customerId,
-      subscription_status: subscription.status,
-      current_period_end: periodEnd,
-      updated_at: now,
-    })
-    .eq('discord_user_id', discordUserId);
+/** @deprecated */
+export async function createPlusCheckoutSession(_discordUserId: string): Promise<string> {
+  throw new Error(STRIPE_DISABLED_MESSAGE);
 }
 
-async function getOrCreateStripeCustomer(discordUserId: string, existingCustomerId: string | null): Promise<string> {
-  if (existingCustomerId) return existingCustomerId;
-  const stripe = stripeClient();
-  const customer = await stripe.customers.create({
-    metadata: { discord_user_id: discordUserId },
-  });
-  const svc = getServiceClient();
-  await svc
-    .from('discord_user_billing')
-    .upsert(
-      {
-        discord_user_id: discordUserId,
-        stripe_customer_id: customer.id,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'discord_user_id' }
-    );
-  return customer.id;
+/** @deprecated */
+export async function createBillingPortalSession(_discordUserId: string): Promise<string> {
+  throw new Error(STRIPE_DISABLED_MESSAGE);
 }
 
-export async function createPlusCheckoutSession(discordUserId: string): Promise<string> {
-  const billing = await ensureBilling(discordUserId);
-  if (billing.planId === 'plus') {
-    throw new Error('already_plus');
-  }
-
-  const priceId = process.env.STRIPE_PRICE_PLUS;
-  if (!priceId) throw new Error('STRIPE_PRICE_PLUS is not set');
-
-  const baseUrl = process.env.APP_BASE_URL?.replace(/\/$/, '');
-  if (!baseUrl) throw new Error('APP_BASE_URL is not set');
-
-  const stripe = stripeClient();
-  const customerId = await getOrCreateStripeCustomer(discordUserId, billing.stripeCustomerId);
-
-  const session = await stripe.checkout.sessions.create({
-    mode: 'subscription',
-    customer: customerId,
-    line_items: [{ price: priceId, quantity: 1 }],
-    metadata: { discord_user_id: discordUserId },
-    subscription_data: {
-      metadata: { discord_user_id: discordUserId },
-    },
-    success_url: `${baseUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${baseUrl}/billing/cancel`,
-  });
-
-  if (!session.url) throw new Error('Stripe checkout URL missing');
-  return session.url;
+/** @deprecated */
+export async function handleStripeCheckoutCompleted(_session: unknown): Promise<void> {
+  throw new Error(STRIPE_DISABLED_MESSAGE);
 }
 
-export async function createBillingPortalSession(discordUserId: string): Promise<string> {
-  const billing = await ensureBilling(discordUserId);
-  if (!billing.stripeCustomerId) {
-    throw new Error('no_customer');
-  }
-
-  const baseUrl = process.env.APP_BASE_URL?.replace(/\/$/, '');
-  if (!baseUrl) throw new Error('APP_BASE_URL is not set');
-
-  const stripe = stripeClient();
-  const session = await stripe.billingPortal.sessions.create({
-    customer: billing.stripeCustomerId,
-    return_url: `${baseUrl}/billing/portal-return`,
-  });
-
-  if (!session.url) throw new Error('Billing portal URL missing');
-  return session.url;
+/** @deprecated */
+export async function handleStripeSubscriptionEvent(_subscription: unknown): Promise<void> {
+  throw new Error(STRIPE_DISABLED_MESSAGE);
 }
 
-export async function handleStripeCheckoutCompleted(session: Stripe.Checkout.Session): Promise<void> {
-  const discordUserId = session.metadata?.discord_user_id;
-  if (!discordUserId) throw new Error('discord_user_id missing in checkout metadata');
+/*
+import Stripe from 'stripe';
 
-  if (session.mode === 'subscription' && session.subscription) {
-    const stripe = stripeClient();
-    const subscriptionId =
-      typeof session.subscription === 'string' ? session.subscription : session.subscription.id;
-    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-    await syncStripeSubscription(discordUserId, subscription);
-    return;
-  }
+const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 
-  if (session.payment_status === 'paid') {
-    const stripe = stripeClient();
-    const plus = PLANS.plus;
-    const svc = getServiceClient();
-    const now = new Date().toISOString();
-    await svc.from('discord_user_billing').upsert(
-      {
-        discord_user_id: discordUserId,
-        plan_id: plus.id,
-        max_friend_slots: plus.maxFriends,
-        stripe_checkout_session_id: session.id,
-        paid_at: now,
-        updated_at: now,
-      },
-      { onConflict: 'discord_user_id' }
-    );
-  }
+function stripeClient(): Stripe {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key) throw new Error('STRIPE_SECRET_KEY is not set');
+  return new Stripe(key, { apiVersion: '2025-02-24.acacia' });
 }
 
-export async function handleStripeSubscriptionEvent(subscription: Stripe.Subscription): Promise<void> {
-  const discordUserId = subscription.metadata?.discord_user_id;
-  if (!discordUserId) {
-    const customerId =
-      typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
-    if (!customerId) return;
-    const svc = getServiceClient();
-    const { data } = await svc
-      .from('discord_user_billing')
-      .select('discord_user_id')
-      .eq('stripe_customer_id', customerId)
-      .maybeSingle();
-    if (!data?.discord_user_id) return;
-    await syncStripeSubscription(data.discord_user_id as string, subscription);
-    return;
-  }
-  await syncStripeSubscription(discordUserId, subscription);
-}
+export async function syncStripeSubscription(...) { ... }
+async function getOrCreateStripeCustomer(...) { ... }
+// 旧 Stripe Checkout / Portal / Webhook 同期ロジック
+*/
