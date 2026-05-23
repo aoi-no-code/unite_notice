@@ -1,54 +1,18 @@
 import { NextRequest } from 'next/server';
-import Stripe from 'stripe';
-import { handleStripeCheckoutCompleted, handleStripeSubscriptionEvent } from '@/lib/billing';
 
 export const runtime = 'nodejs';
 
-export async function POST(req: NextRequest) {
-  const secret = process.env.STRIPE_SECRET_KEY;
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!secret || !webhookSecret) {
-    return new Response('Stripe is not configured', { status: 500 });
-  }
-
-  const stripe = new Stripe(secret, { apiVersion: '2025-02-24.acacia' });
-  const signature = req.headers.get('stripe-signature');
-  if (!signature) {
-    return new Response('Missing stripe-signature', { status: 400 });
-  }
-
-  const body = await req.text();
-  let event: Stripe.Event;
-  try {
-    event = stripe.webhooks.constructEvent(body, signature, webhookSecret);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Invalid signature';
-    return new Response(message, { status: 400 });
-  }
-
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object as Stripe.Checkout.Session;
-        await handleStripeCheckoutCompleted(session);
-        break;
-      }
-      case 'customer.subscription.updated':
-      case 'customer.subscription.deleted': {
-        const subscription = event.data.object as Stripe.Subscription;
-        await handleStripeSubscriptionEvent(subscription);
-        break;
-      }
-      default:
-        break;
-    }
-    return new Response(JSON.stringify({ received: true }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Webhook handler failed';
-    console.error('[billing/webhook]', event.type, message);
-    return new Response(message, { status: 500 });
-  }
+/**
+ * Stripe Webhook（無効化）
+ * PayPay 手動確認に移行したため、Stripe イベントは処理しません。
+ * 復帰時は git 履歴の handleStripeCheckoutCompleted 等を参照してください。
+ */
+export async function POST(_req: NextRequest) {
+  return new Response(
+    JSON.stringify({
+      error: 'stripe_disabled',
+      message: 'Stripe webhook is disabled. Premium uses PayPay manual review via /premium.',
+    }),
+    { status: 410, headers: { 'Content-Type': 'application/json' } }
+  );
 }
